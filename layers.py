@@ -24,6 +24,15 @@ def disp_to_depth(disp, min_depth, max_depth):
     depth = 1 / scaled_disp
     return scaled_disp, depth
 
+## ZMH: added by me. to visualize gt depth as disp
+def depth_to_disp(depth, min_depth, max_depth):
+    min_disp = 1 / max_depth
+    max_disp = 1 / min_depth
+    # scaled_disp = torch.where(depth > 0, 1 / depth, 0)
+    zeros_ = torch.zeros_like(depth)
+    scaled_disp = torch.where(depth > 0, torch.clamp(1 / depth, min=min_disp, max=max_disp), zeros_)
+    disp = torch.where(scaled_disp > 0, ( scaled_disp - min_disp ) / (max_disp - min_disp), zeros_)
+    return disp
 
 def transformation_from_parameters(axisangle, translation, invert=False):
     """Convert the network's (axisangle, translation) output into a 4x4 matrix
@@ -160,12 +169,49 @@ class BackprojectDepth(nn.Module):
         self.pix_coords = nn.Parameter(torch.cat([self.pix_coords, self.ones], 1),
                                        requires_grad=False)
 
-    def forward(self, depth, inv_K):
-        cam_points = torch.matmul(inv_K[:, :3, :3], self.pix_coords)
-        cam_points = depth.view(self.batch_size, 1, -1) * cam_points
-        cam_points = torch.cat([cam_points, self.ones], 1)
+    def forward(self, depth, inv_K, separate=False, own_pix_coords=None, as_img=False):
+        if not separate:
+            if own_pix_coords is None:
+                cam_points = torch.matmul(inv_K[:, :3, :3], self.pix_coords)
+            else:
+                cam_points = torch.matmul(inv_K[:, :3, :3], own_pix_coords)
+            cam_points = depth.view(self.batch_size, 1, -1) * cam_points
+            cam_points = torch.cat([cam_points, self.ones], 1)
+            if as_img:
+                cam_points = cam_points.view(self.batch_size, 4, self.height, self.width)
+            return cam_points # ZMH: B*4*N?
+        else:
+            cam_points = {}
+            masks = {}
+            # print("back_proj depth shape", depth.shape)
+            for i in range(self.batch_size):
+                depth_i = depth[i:i+1]
+                # print("back_proj depth_i shape", depth_i.shape)
+                depth_i = depth_i.view(1, 1, -1)
+                mask_i = (depth_i > 0).squeeze()
+                masks[i] = mask_i
+                depth_i_sel = depth_i[..., mask_i] 
+                # print("back_proj depth_i_sel shape", depth_i_sel.shape)
+                if own_pix_coords is None:
+                    pix_coords_i = self.pix_coords[i:i+1]
+                else:
+                    pix_coords_i = own_pix_coords[i,i+1]
+                # print("back_proj pix_coords_i shape", pix_coords_i.shape)
 
-        return cam_points
+                pix_coords_i_sel = pix_coords_i[..., mask_i]
+                # print("back_proj pix_coords_i_sel shape", pix_coords_i_sel.shape)
+
+                ones = self.ones[i:i+1]
+                # print("back_proj ones_i shape", ones.shape)
+                ones_sel = ones[..., mask_i]
+                # print("back_proj ones_sel shape", ones_sel.shape)
+
+                cam_points_i = torch.matmul(inv_K[i:i+1, :3, :3], pix_coords_i_sel)
+                cam_points_i = depth_i_sel * cam_points_i
+                cam_points_i = torch.cat([cam_points_i, ones_sel ], 1)
+                cam_points[i] = cam_points_i
+
+            return cam_points, masks
 
 
 class Project3D(nn.Module):
@@ -180,9 +226,9 @@ class Project3D(nn.Module):
         self.eps = eps
 
     def forward(self, points, K, T):
-        P = torch.matmul(K, T)[:, :3, :]
+        P = torch.matmul(K, T)[:, :3, :] # ZMH: B*3*4?
 
-        cam_points = torch.matmul(P, points)
+        cam_points = torch.matmul(P, points) # ZMH: points: B*4*N, output: B*3*N?
 
         pix_coords = cam_points[:, :2, :] / (cam_points[:, 2, :].unsqueeze(1) + self.eps)
         pix_coords = pix_coords.view(self.batch_size, 2, self.height, self.width)
@@ -190,7 +236,7 @@ class Project3D(nn.Module):
         pix_coords[..., 0] /= self.width - 1
         pix_coords[..., 1] /= self.height - 1
         pix_coords = (pix_coords - 0.5) * 2
-        return pix_coords
+        return pix_coords # ZMH: B*2*N?
 
 
 def upsample(x):

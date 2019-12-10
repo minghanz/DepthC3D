@@ -34,7 +34,7 @@ class MonodepthOptions:
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split"],
                                  default="eigen_zhou")
         self.parser.add_argument("--num_layers",
                                  type=int,
@@ -45,7 +45,7 @@ class MonodepthOptions:
                                  type=str,
                                  help="dataset to train on",
                                  default="kitti",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test"])
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM"])
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")
@@ -82,12 +82,20 @@ class MonodepthOptions:
                                  type=int,
                                  help="frames to load",
                                  default=[0, -1, 1])
+        self.parser.add_argument("--ref_depth",
+                                 type=float,
+                                 help="ref depth r in r/(r+d)",
+                                 default=10.0)
 
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size",
                                  type=int,
                                  help="batch size",
                                  default=12)
+        self.parser.add_argument("--iters_per_update",
+                                 type=int,
+                                 help="this value times batch_size is the effective batch size",
+                                 default=1) ### ZMH: added
         self.parser.add_argument("--learning_rate",
                                  type=float,
                                  help="learning rate",
@@ -132,6 +140,28 @@ class MonodepthOptions:
                                  help="normal or shared",
                                  default="separate_resnet",
                                  choices=["posecnn", "separate_resnet", "shared"])
+        ## switch for enabling CVO loss
+        self.parser.add_argument("--cvo_loss",
+                                 help="if set, calculate cvo loss",
+                                 action="store_true")
+        self.parser.add_argument("--normalize_inprod_over_pts",
+                                 help="if set, inner product is divided by the product of total number of points in two pcls",
+                                 action="store_true")
+        self.parser.add_argument("--supervised_by_gt_depth",
+                                 help="if set, the CVO loss is computed by comparing with true depth",
+                                 action="store_true")
+        self.parser.add_argument("--cvo_as_loss",
+                                 help="if set, cvo loss is used for training",
+                                 action="store_true")
+        self.parser.add_argument("--sup_cvo_pose_lidar",
+                                 help="if set, cvo loss is used for supervising pose using lidar points",
+                                 action="store_true")
+        self.parser.add_argument("--disp_in_loss",
+                                 help="if set, disparity L1 difference is used in depth training",
+                                 action="store_true")
+        self.parser.add_argument("--cvo_loss_dense",
+                                 help="if set, calculate cvo loss using dense image",
+                                 action="store_true")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",

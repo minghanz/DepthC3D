@@ -11,7 +11,7 @@ import skimage.transform
 import numpy as np
 import PIL.Image as pil
 
-from kitti_utils import generate_depth_map
+from kitti_utils import generate_depth_map, flip_lidar, project_lidar_to_img
 from .mono_dataset import MonoDataset
 
 
@@ -50,6 +50,66 @@ class KITTIDataset(MonoDataset):
         return color
 
 
+class TUMRGBDDataset(MonoDataset):
+    """
+    For loading TUM data
+    """
+    def __init__(self, *args, **kwargs):
+        super(TUMRGBDDataset, self).__init__(*args, **kwargs)
+        # self.K = np.array([[525.0, 0, 319.5, 0], 
+        #                    [0, 525.0, 239.5, 0], 
+        #                    [0, 0, 1, 0], 
+        #                    [0, 0, 0, 1]], dtype=np.float32)
+        self.K = np.array([[0.8203125, 0, 0.49921875, 0], 
+                           [0, 1.09375, 0.4989583, 0], 
+                           [0, 0, 1, 0], 
+                           [0, 0, 0, 1]], dtype=np.float32)
+        self.full_res_shape = (640, 480)
+        # self.side_map = {"2": 2, "3": 3, "l": 2, "r": 3}
+    
+    def check_depth(self):
+        ### TUM dataset split files are in the format of sequence_folder rgb_file_name depth_file_name l
+        line = self.filenames[0].split()
+        scene_name = line[0]
+        frame_index = int(line[1])
+
+        velo_filename = os.path.join(
+            self.data_path,
+            scene_name, "depth",
+            "{:010d}.png".format(int(frame_index)))
+
+        return os.path.isfile(velo_filename)
+    
+    def get_color(self, folder, frame_index, side, do_flip):
+        color = self.loader(self.get_image_path(folder, frame_index))
+
+        if do_flip:
+            color = color.transpose(pil.FLIP_LEFT_RIGHT)
+
+        return color
+
+    def get_depth(self, folder, frame_index, side, do_flip):
+        f_str = "{:010d}.png".format(frame_index)
+        depth_path = os.path.join(
+            self.data_path, folder, "depth", f_str)
+
+        depth_gt = pil.open(depth_path)
+        depth_gt = depth_gt.resize(self.full_res_shape, pil.NEAREST)
+        depth_gt = np.array(depth_gt).astype(np.float32) / 5000
+
+        if do_flip:
+            depth_gt = np.fliplr(depth_gt)
+
+        return depth_gt
+
+    def get_image_path(self, folder, frame_index):
+        f_str = "{:010d}{}".format(frame_index, self.img_ext)
+        image_path = os.path.join(
+            self.data_path, folder, "rgb", f_str)
+        return image_path
+
+
+
 class KITTIRAWDataset(KITTIDataset):
     """KITTI dataset which loads the original velodyne depth maps for ground truth
     """
@@ -70,14 +130,21 @@ class KITTIRAWDataset(KITTIDataset):
             folder,
             "velodyne_points/data/{:010d}.bin".format(int(frame_index)))
 
-        depth_gt = generate_depth_map(calib_path, velo_filename, self.side_map[side])
-        depth_gt = skimage.transform.resize(
-            depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode='constant')
+        velo_rect, P_rect_norm, im_shape  = generate_depth_map(calib_path, velo_filename, self.side_map[side])
+        depth_gt = project_lidar_to_img(velo_rect, P_rect_norm, self.full_res_shape[::-1])
+
+        ### ZMH: changed by me. 
+        ### The shape is just a little bit different, not huge resizing, because the depth_gt before resizing have a little bit different sizes
+        # depth_gt = skimage.transform.resize(
+        #     depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode='constant') # don't use this one
+        # depth_gt = skimage.transform.resize(
+        #     depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode='constant', anti_aliasing=False)
 
         if do_flip:
             depth_gt = np.fliplr(depth_gt)
+            # velo_rect = flip_lidar(velo_rect, P_rect_norm) # ZMH: add by me
 
-        return depth_gt
+        return depth_gt, velo_rect, P_rect_norm
 
 
 class KITTIOdomDataset(KITTIDataset):
