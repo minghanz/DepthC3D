@@ -27,9 +27,14 @@ from IPython import embed
 
 
 import sys
-sys.path.append('/home/minghanz/pytorch-unet')
+script_path = os.path.dirname(__file__)
+sys.path.append(os.path.join(script_path, '../pytorch-unet'))
 from geometry_plot import draw3DPts
 from geometry import gramian, kern_mat, rgb_to_hsv
+
+import threading
+
+from cvo_utils import PtSampleInGrid
 
 import torch
 torch.manual_seed(0)
@@ -58,7 +63,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -569,16 +574,187 @@ class Trainer:
             rgb_gt[ib] = color_sel
         outputs[("rgb_gt", frame_id, scale)] = rgb_gt
 
+    def flat_from_grid(self, grid_valid, grid_info_dict):
+        ### ZMH: grid_xyz, grid_uv -> grid_valid, flat_xyz, flat_uv
+        flat_info_dict = {}
+        for item in grid_info_dict:
+            flat_info_dict[item] = {}
+
+        for i in range(self.opt.batch_size):
+            mask_i = grid_valid[i].view(-1)
+            for item in grid_info_dict:
+                info_i = grid_info_dict[item][i]
+                info_i = info_i.view(info_i.shape[0], -1)
+                info_i_sel = info_i[:, mask_i]
+                flat_info_dict[item][i] = info_i_sel.unsqueeze(0) # ZMH: 1*C*N
+
+        return flat_info_dict
+
+    def get_grid_flat(self, frame_id, scale, inputs, outputs):
+        #### Generate: [pts (B*2*N), pts_info (B*C*N), grid_source (B*C*H*W), grid_valid (B*1*H*W)] in self frame and host frame
+        #### outputs[("pts", frame_id, scale, frame_cd, gt_or_not)]
+        for gt_flag in [True, False]:
+            if gt_flag: 
+                cam_pts_grid = self.backproject_depth[scale](
+                    inputs[("depth_gt_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
+                outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)] = cam_pts_grid[:,:3] # ZMH: B*3*H*W
+                outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask_gt", frame_id, scale)]  # ZMH: B*1*H*W
+            else:
+                cam_pts_grid = self.backproject_depth[scale](
+                    outputs[("depth_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
+                outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)] = cam_pts_grid[:,:3]
+                outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask", frame_id, scale)] 
+
+            outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)] = rgb_to_hsv(inputs[("color", frame_id, scale)], flat=False)
+                
+            grid_info_dict = {}
+            grid_info_dict["xyz"] = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
+            grid_info_dict["uv"] = self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1) # ZMH: B*2*H*W
+            grid_info_dict["hsv"] = outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)]
+            grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
+            flat_info_dict = self.flat_from_grid(grid_valid, grid_info_dict)
+            outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["xyz"]
+            outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["uv"]
+            outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["hsv"]
+
+            combos_needed = None
+
+            if frame_id == 0:
+                id_pairs = [(0,1), (0,-1)]
+            else:
+                id_pairs = [(frame_id, 0)]
+
+            for id_pair in id_pairs:
+                combo = (id_pair[0], id_pair[1], gt_flag)
+                need_calc = combos_needed is None or combo in combos_needed
+                if need_calc:
+                    other_id = id_pair[0] if id_pair[0] != 0 else id_pair[1] # ZMH: the one that is not zero
+                    wrap_id = 0 if frame_id != 0 else other_id # ZMH: the one that is not current frame_id
+                    
+                    T = outputs[("cam_T_cam", 0, other_id)] # T_x0
+                    outputs[("flat_xyz", frame_id, scale, wrap_id, gt_flag)] = {}
+                    outputs[("flat_uv", frame_id, scale, wrap_id, gt_flag)] = {}
+                    outputs[("flat_hsv", frame_id, scale, wrap_id, gt_flag)] = {}
+                    for ib in range(self.opt.batch_size):
+                        Ti = T[ib:ib+1]
+                        Ki = inputs[("K", scale)][ib:ib+1, :3, :3]
+                        ones = torch.ones( (1, 1, flat_info_dict["xyz"][ib].shape[2]) , dtype=flat_info_dict["xyz"][ib].dtype, device=self.device)
+                        cam_homo = torch.cat( [flat_info_dict["xyz"][ib], ones], dim=1)
+
+                        if frame_id == 0:
+                            cam_wrap = torch.matmul(Ti, cam_homo)[:, :3]     # px = T_x0 * p0         # ZMH: B*3*N
+                        else:
+                            Ti_inv = torch.inverse(Ti)
+                            cam_wrap = torch.matmul(Ti_inv, cam_homo)[:, :3] # p0 = T_0x * px         # ZMH: B*3*N
+
+                        outputs[("flat_xyz", frame_id, scale, wrap_id, gt_flag)][ib] = cam_wrap
+                        cam_uv_wrap = torch.matmul(Ki, cam_wrap) # ZMH: B*3*N
+                        pix_coords = cam_uv_wrap[:, :2, :] / (cam_uv_wrap[:, 2, :].unsqueeze(1) + 1e-7) - 1 # ZMH: B*2*N
+                        outputs[("flat_uv", frame_id, scale, wrap_id, gt_flag)][ib] = pix_coords.detach()
+                        outputs[("flat_hsv", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)][ib]
+
+
+    def concat_flat(self, outputs):
+        for item in outputs:
+            if "flat_" in item[0]:
+                to_cat = []
+                for ib in range(self.opt.batch_size):
+                    if "flat_uv" in item[0]:
+                        n_pts = outputs[item][ib].shape[-1]
+                        frame_indicater = torch.ones((1,1,n_pts), dtype=outputs[item][ib].dtype, device=self.device) * ib
+                        flat_iuv = torch.cat([outputs[item][ib], frame_indicater ], dim=1) # here requires_grad=False
+                        to_cat.append(flat_iuv)
+                    else:
+                        to_cat.append(outputs[item][ib])
+                outputs[item] = torch.cat(to_cat, dim=2)
+                  
+                    
+    def inp_combo_from_dist_combo(self, dist_combos):
+        inp_combos = []
+        for combo in dist_combos:
+            inp_combos.append(combo)
+            id0, id1, gt0, gt1 = combo
+            combo0 = (id0, id0, gt0, gt0)
+            combo1 = (id1, id1, gt1, gt1)
+            if combo0 not in inp_combos:
+                inp_combos.append(combo0)
+            if combo1 not in inp_combos:
+                inp_combos.append(combo1)
+        return inp_combos
+
+    def get_innerp_from_grid_flat(self, outputs):
+        dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
+        inp_combos = self.inp_combo_from_dist_combo(dist_combos)
+
+        feats_needed = ["xyz", "hsv"]
+        feats_ell = {}
+        feats_ell["xyz"] = 0.2
+        feats_ell["hsv"] = 0.2
+        neighbor_range = int(1)
+        innerp_dict = {}
+        for combo in inp_combos:
+            flat_idx, grid_idx, flat_gt, grid_gt = combo
+            for scale in self.opt.scales:
+                innerp_singles = {}
+                for feat in feats_needed:
+                    # pts, pts_info, grid_source, grid_valid, neighbor_range, ell
+                    flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)]
+                    flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)]
+                    grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
+                    grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)]
+                    ell = float(feats_ell[feat])
+                    innerp_singles[feat] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
+                if len(feats_needed) == 1:
+                    innerp = innerp_singles[feats_needed[0]]
+                else:
+                    innerp = innerp_singles[feats_needed[0]] * innerp_singles[feats_needed[1]]
+                    if len(feats_needed) > 2:
+                        for feat in feats_needed[2:]:
+                            innerp = innerp * innerp_singles[feat]
+                innerp_sum = innerp.sum()
+                item_name = str(combo)+"s"+str(scale)
+                innerp_dict[item_name] = innerp_sum
+        
+        dist_dict, cos_dict = self.get_dist_from_inp_grid_flat(dist_combos, innerp_dict)
+
+        return innerp_dict, dist_dict, cos_dict
+
+    def get_dist_from_inp_grid_flat(self, dist_combos, innerp_dict):
+        dist_dict = {}
+        cos_dict = {}
+        for combo in dist_combos:
+            id0, id1, gt0, gt1 = combo
+            combo0 = (id0, id0, gt0, gt0)
+            combo1 = (id1, id1, gt1, gt1)
+            for scale in self.opt.scales:
+                item_name = "{}s{}"
+                dist_dict[item_name.format(combo, scale)] = innerp_dict[item_name.format(combo0, scale)] + innerp_dict[item_name.format(combo1, scale)] - 2 * innerp_dict[item_name.format(combo, scale)]
+                cos_dict[item_name.format(combo, scale)] = 1 - innerp_dict[item_name.format(combo, scale)] / torch.sqrt(innerp_dict[item_name.format(combo0, scale)] * innerp_dict[item_name.format(combo1, scale)] )
+        
+        return dist_dict, cos_dict
+
+    def reg_cvo_to_loss(self, losses, innerp_dict, dist_dict, cos_dict):
+        losses["loss_cvo/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+        losses["loss_cos/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+        losses["loss_inp/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+        for scale in self.opt.scales:
+            for frame_id in self.opt.frame_ids:
+                item_name = "(0, {}, True, False)s{}"
+                losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[item_name.format(frame_id, scale)]
+                losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[item_name.format(frame_id, scale)]
+                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = innerp_dict[item_name.format(frame_id, scale)]
+                losses["loss_cvo/sum"] += losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)]
+                losses["loss_cos/sum"] += losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)]
+                losses["loss_inp/sum"] += losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]
+                
+        return
+
     def get_xyz_dense(self, frame_id, scale, inputs, outputs):
         cam_points_gt = self.backproject_depth[scale](
             inputs[("depth_gt_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
 
-        if frame_id == 0:
-            cam_points_pred = self.backproject_depth[scale](
-                outputs[("depth_wrap", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
-        else:
-            cam_points_pred = self.backproject_depth[scale](
-                outputs[("depth", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
+        cam_points_pred = self.backproject_depth[scale](
+            outputs[("depth_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
 
         outputs[("xyz1_dense_gt", frame_id, scale)] = cam_points_gt
         outputs[("xyz1_dense_pred", frame_id, scale)] = cam_points_pred
@@ -616,6 +792,25 @@ class Trainer:
         xyz_aligned[1] = xyz1[1][:,:3]
         return xyz_aligned
 
+    def create_moving_slice(self, i, half_h, half_w, xyz_pair_off, mask_pair_off, hsv_pair_off, xyz_pair, mask_pair, hsv_pair, height, width ):
+        for j in range(-half_w, half_w):
+            off_h0_start = max(0, -i)
+            off_h0_end = min(0, -i)
+            off_w0_start = max(0, -j)
+            off_w0_end = min(0, -j)
+            off_h1_start = -off_h0_end
+            off_h1_end = -off_h0_start
+            off_w1_start = -off_w0_end
+            off_w1_end = -off_w0_start
+            
+
+            # idx = (i + half_h) * (2 * half_w + 1) + j + half_w
+            idx = j + half_w
+            xyz_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = xyz_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
+            mask_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = mask_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
+            if hsv_pair is not None:
+                hsv_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = hsv_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
+
     def calc_inp_from_dense(self, xyz_pair, mask_pair, hsv_pair=None):
         xyz_ell = self.geo_scale
         hsv_ell = 0.4
@@ -630,57 +825,84 @@ class Trainer:
 
         num_off = (2*half_w+1) * (2*half_h+1)
 
+        # start_time = time.time()
         xyz_pair_off = torch.zeros((self.opt.batch_size, 3, num_off, height, width), device=self.device, dtype=xyz_pair[0].dtype)
         mask_pair_off = torch.zeros((self.opt.batch_size, 1, num_off, height, width), device=self.device, dtype=torch.bool)
         
         if hsv_pair is not None:
             hsv_pair_off = torch.zeros((self.opt.batch_size, 3, num_off, height, width), device=self.device, dtype=hsv_pair[0].dtype)
 
-        for i in range(-half_h, half_h):
-            # idx_dest_row = []
-            # idx_dest_col = []
-            # idx_from_row = []
-            # idx_from_col = []
-            for j in range(-half_w, half_w):
-                off_h0_start = max(0, -i)
-                off_h0_end = min(0, -i)
-                off_w0_start = max(0, -j)
-                off_w0_end = min(0, -j)
-                off_h1_start = -off_h0_end
-                off_h1_end = -off_h0_start
-                off_w1_start = -off_w0_end
-                off_w1_end = -off_w0_start
-                
+        if not self.opt.multithread:
 
-                idx = (i + half_h) * (2 * half_w + 1) + j + half_w
-                xyz_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = xyz_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
-                mask_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = mask_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
-                if hsv_pair is not None:
-                    hsv_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = hsv_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
+            for i in range(-half_h, half_h+1):
+                for j in range(-half_w, half_w+1):
+                    off_h0_start = max(0, -i)
+                    off_h0_end = min(0, -i)
+                    off_w0_start = max(0, -j)
+                    off_w0_end = min(0, -j)
+                    off_h1_start = -off_h0_end
+                    off_h1_end = -off_h0_start
+                    off_w1_start = -off_w0_end
+                    off_w1_end = -off_w0_start
+                    
+                    idx = (i + half_h) * (2 * half_w + 1) + j + half_w
+                    xyz_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = xyz_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
+                    mask_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = mask_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
+                    if hsv_pair is not None:
+                        hsv_pair_off[:,:,idx, off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = hsv_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
 
-                # diff_xyz = torch.zeros((self.opt.batch_size, 1, height, width), device=self.device, dtype=xyz_pair[0].dtype)
-                # diff_xyz[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = \
-                #     torch.pow(torch.norm(xyz_pair[0][:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] - \
-                #         xyz_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end], dim=1 ), 2)
-                # exp_xyz = torch.exp(-diff_xyz / (2*xyz_ell*xyz_ell))
-                # exp = exp_xyz
+                    # diff_xyz = torch.zeros((self.opt.batch_size, 1, height, width), device=self.device, dtype=xyz_pair[0].dtype)
+                    # diff_xyz[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = \
+                    #     torch.pow(torch.norm(xyz_pair[0][:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] - \
+                    #         xyz_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end], dim=1 ), 2)
+                    # exp_xyz = torch.exp(-diff_xyz / (2*xyz_ell*xyz_ell))
+                    # exp = exp_xyz
 
-                # if hsv_pair is not None:
-                #     diff_hsv = torch.zeros((self.opt.batch_size, 1, height, width), device=self.device, dtype=hsv_pair[0].dtype)
-                #     diff_hsv[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = \
-                #         torch.pow(torch.norm(hsv_pair[0][:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] - \
-                #             hsv_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end], dim=1 ), 2)
-                #     exp_hsv = torch.exp(-diff_hsv / (2*hsv_ell*hsv_ell))
-                #     exp = torch.mul(exp_xyz, exp_hsv)
+                    # if hsv_pair is not None:
+                    #     diff_hsv = torch.zeros((self.opt.batch_size, 1, height, width), device=self.device, dtype=hsv_pair[0].dtype)
+                    #     diff_hsv[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = \
+                    #         torch.pow(torch.norm(hsv_pair[0][:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] - \
+                    #             hsv_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end], dim=1 ), 2)
+                    #     exp_hsv = torch.exp(-diff_hsv / (2*hsv_ell*hsv_ell))
+                    #     exp = torch.mul(exp_xyz, exp_hsv)
 
-                # mask = mask_pair[0].clone()
-                # mask[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = \
-                #     mask[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] & \
-                #         mask_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
+                    # mask = mask_pair[0].clone()
+                    # mask[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] = \
+                    #     mask[:,:,off_h0_start : height+off_h0_end, off_w0_start : width+off_w0_end] & \
+                    #         mask_pair[1][:,:,off_h1_start : height+off_h1_end, off_w1_start : width+off_w1_end]
 
-                # exp = torch.where(mask, exp, zeros_dummy)
-                # exp_sum = exp_sum + exp.sum()
+                    # exp = torch.where(mask, exp, zeros_dummy)
+                    # exp_sum = exp_sum + exp.sum()
         
+        else:
+            threads = []
+            # xyz_pair_off_l = [None] * (2*half_h+1)
+            # mask_pair_off_l = [None] * (2*half_h+1)
+            # hsv_pair_off_l = [None] * (2*half_h+1)
+            xyz_pair_off_l = torch.split(xyz_pair_off, 2*half_w+1, dim=2)
+            mask_pair_off_l = torch.split(mask_pair_off, 2*half_w+1, dim=2)
+            if hsv_pair is not None:
+                hsv_pair_off_l = torch.split(hsv_pair_off, 2*half_w+1, dim=2)
+
+            for zero_idx, i in enumerate(range(-half_h, half_h+1)):
+                # xyz_pair_off_l[zero_idx] = torch.zeros((self.opt.batch_size, 3, 2*half_w+1, height, width), device=self.device, dtype=xyz_pair[0].dtype)
+                # mask_pair_off_l[zero_idx] = torch.zeros((self.opt.batch_size, 1, 2*half_w+1, height, width), device=self.device, dtype=torch.bool)
+                # if hsv_pair is not None:
+                #     hsv_pair_off_l[zero_idx] = torch.zeros((self.opt.batch_size, 3, 2*half_w+1, height, width), device=self.device, dtype=hsv_pair[0].dtype)
+
+                x = threading.Thread(target=self.create_moving_slice, args=(i, half_h, half_w, xyz_pair_off_l[zero_idx], mask_pair_off_l[zero_idx], hsv_pair_off_l[zero_idx], xyz_pair, mask_pair, hsv_pair, height, width ) )
+                threads.append(x)
+                x.start()
+            for x in threads:
+                x.join()
+                
+            xyz_pair_off = torch.cat(xyz_pair_off_l, dim=2)
+            mask_pair_off = torch.cat(mask_pair_off_l, dim=2)
+            hsv_pair_off = torch.cat(hsv_pair_off_l, dim=2)
+
+        # end_time = time.time()
+        # print("time elapsed", end_time-start_time)
+
         diff_xyz = torch.exp( -torch.pow(torch.norm(xyz_pair[0].unsqueeze(2) - xyz_pair_off, dim=1), 2) / (2*xyz_ell*xyz_ell) )
         diff = diff_xyz
         if hsv_pair is not None:
@@ -749,12 +971,16 @@ class Trainer:
             if self.opt.cvo_loss:
                 # self.gen_pcl_gt(inputs, outputs, disp, scale, 0)
                 depth_curscale, _ = self.from_disp_to_depth(disp, scale, force_multiscale=True)
+                outputs[("depth_scale", 0, scale)] = depth_curscale
                 outputs[("depth_wrap", 0, scale)] = depth_curscale
                 cam_points_curscale = self.backproject_depth[scale](
                     depth_curscale, inputs[("inv_K", scale)])
                 
                 if self.opt.cvo_loss_dense:
-                    self.get_xyz_dense(0, scale, inputs, outputs)
+                    if not self.opt.dense_flat_grid:
+                        self.get_xyz_dense(0, scale, inputs, outputs)
+                    else:
+                        self.get_grid_flat(0, scale, inputs, outputs)
                 else:
                     masks = self.gen_pcl_wrap_host(inputs, outputs, scale)
 
@@ -806,18 +1032,21 @@ class Trainer:
                     
                     # self.gen_pcl_gt(inputs, outputs, disp, scale, frame_id, T_inv) 
                     depth_curscale, _ = self.from_disp_to_depth(disp, scale, force_multiscale=True)
-                    outputs[("depth", frame_id, scale)] = depth_curscale         
+                    outputs[("depth_scale", frame_id, scale)] = depth_curscale         
 
                     if self.opt.cvo_loss_dense:
-                        self.get_xyz_dense(frame_id, scale, inputs, outputs)
-
+                        if not self.opt.dense_flat_grid:
+                            self.get_xyz_dense(frame_id, scale, inputs, outputs)
+                        else:
+                            self.get_grid_flat(frame_id, scale, inputs, outputs)
                     else:
+                        ## ZMH: sample in adjacent frames
                         pix_coords_curscale = self.project_3d[scale](
                             cam_points_curscale, inputs[("K", scale)], T)
                         outputs[("sample_wrap", frame_id, scale)] = pix_coords_curscale
 
                         outputs[("depth_wrap", frame_id, scale)] = F.grid_sample(
-                            outputs[("depth", frame_id, scale)],
+                            outputs[("depth_scale", frame_id, scale)],
                             outputs[("sample_wrap", frame_id, scale)],
                             padding_mode="border")
 
@@ -829,7 +1058,7 @@ class Trainer:
                         outputs[("uv_wrap", frame_id, scale)] = F.grid_sample(
                             self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
                             outputs[("sample_wrap", frame_id, scale)],
-                            padding_mode="border")
+                            padding_mode="border")          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
                         
                         self.gen_pcl_wrap_other(inputs, outputs, scale, frame_id, T_inv, masks)
 
@@ -1060,21 +1289,28 @@ class Trainer:
         # total_cos_loss = 0
 
         if self.opt.cvo_loss_dense:
-            innerps = self.gen_innerp_dense(inputs, outputs)
+            if not self.opt.dense_flat_grid:
+                innerps = self.gen_innerp_dense(inputs, outputs)
+            else:
+                self.concat_flat(outputs)
+                innerps, dists, coss = self.get_innerp_from_grid_flat(outputs)
+                self.reg_cvo_to_loss(losses, innerps, dists, coss)
+
 
         if not self.train_flag or self.opt.sup_cvo_pose_lidar:
             if self.opt.cvo_loss_dense:
-                losses["loss_pose/cos_sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
-                losses["loss_pose/cvo_sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
-                for frame_id in self.opt.frame_ids[1:]:
-                    for scale in self.opt.scales:
-                        inp, f_dist, cos_sim = self.gen_cvo_loss_dense(innerps, (0, frame_id), scale, (True, True) )
-                        losses["loss_pose/cvo_s{}_f{}".format(scale, frame_id)] = f_dist
-                        losses["loss_pose/cos_s{}_f{}".format(scale, frame_id)] = cos_sim
-                        losses["loss_pose/inp_s{}_f{}".format(scale, frame_id)] = inp
+                if not self.opt.dense_flat_grid:
+                    losses["loss_pose/cos_sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+                    losses["loss_pose/cvo_sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+                    for frame_id in self.opt.frame_ids[1:]:
+                        for scale in self.opt.scales:
+                            inp, f_dist, cos_sim = self.gen_cvo_loss_dense(innerps, (0, frame_id), scale, (True, True) )
+                            losses["loss_pose/cvo_s{}_f{}".format(scale, frame_id)] = f_dist
+                            losses["loss_pose/cos_s{}_f{}".format(scale, frame_id)] = cos_sim
+                            losses["loss_pose/inp_s{}_f{}".format(scale, frame_id)] = inp
 
-                        losses["loss_pose/cos_sum"] += cos_sim
-                        losses["loss_pose/cvo_sum"] += f_dist
+                            losses["loss_pose/cos_sum"] += cos_sim
+                            losses["loss_pose/cvo_sum"] += f_dist
             else:
                 self.calc_cvo_pose_loss(inputs, outputs, losses)
 
@@ -1084,9 +1320,11 @@ class Trainer:
         for scale in self.opt.scales:
             losses["loss_disp/{}".format(scale)] = disp_losses[scale]
         
-        losses["loss_cvo/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
-        losses["loss_cos/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
-        losses["loss_inp/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+        if not self.train_flag or self.opt.supervised_by_gt_depth:
+            if self.opt.cvo_loss and not (self.opt.cvo_loss_dense and self.opt.dense_flat_grid):
+                losses["loss_cvo/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+                losses["loss_cos/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+                losses["loss_inp/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
 
         for scale in self.opt.scales:
             loss = 0
@@ -1134,16 +1372,17 @@ class Trainer:
                     #     rgb_1 = outputs[("rgb_in_host", frame_id, scale)]
                     
                     if self.opt.cvo_loss_dense:
-                        for frame_id in self.opt.frame_ids[1:]:
-                            inp, f_dist, cos_sim = self.gen_cvo_loss_dense(innerps, (0, frame_id), scale, (True, False) )
-                            
-                            losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = f_dist
-                            losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_sim
-                            losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp
-                            
-                            losses["loss_cvo/sum"] += f_dist
-                            losses["loss_cos/sum"] += cos_sim
-                            losses["loss_inp/sum"] += inp
+                        if not self.opt.dense_flat_grid:
+                            for frame_id in self.opt.frame_ids[1:]:
+                                inp, f_dist, cos_sim = self.gen_cvo_loss_dense(innerps, (0, frame_id), scale, (True, False) )
+                                
+                                losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = f_dist
+                                losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_sim
+                                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp
+                                
+                                losses["loss_cvo/sum"] += f_dist
+                                losses["loss_cos/sum"] += cos_sim
+                                losses["loss_inp/sum"] += inp
 
                     else:
                         for gt_mode in [True]:# [True, False]:
@@ -1481,8 +1720,8 @@ class Trainer:
 
                 # if s == 0:
                     # print('shape 1', outputs[("disp", s)][j].shape)
-                disp = depth_to_disp(inputs[("depth_gt_scale", 0, s)], self.opt.min_depth, self.opt.max_depth)
-                disp = disp.squeeze(1)
+                disp = depth_to_disp(inputs[("depth_gt_scale", 0, s)][j], self.opt.min_depth, self.opt.max_depth)
+                # disp = disp.squeeze(1)
                 # print('shape 2', disp.shape)
                 writer.add_image(
                     "disp_{}/gt_{}".format(s, j),

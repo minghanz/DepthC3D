@@ -24,7 +24,8 @@ class MonodepthOptions:
         self.parser.add_argument("--log_dir",
                                  type=str,
                                  help="log directory",
-                                 default=os.path.join(os.path.expanduser("~"), "tmp"))
+                                 default=os.path.join(file_dir, "tmp"))
+                              #    default=os.path.join(os.path.expanduser("~"), "tmp"))
 
         # TRAINING options
         self.parser.add_argument("--model_name",
@@ -161,6 +162,12 @@ class MonodepthOptions:
                                  action="store_true")
         self.parser.add_argument("--cvo_loss_dense",
                                  help="if set, calculate cvo loss using dense image",
+                                 action="store_true")
+        self.parser.add_argument("--multithread",
+                                 help="if set, dense cvo loss is calculated multithreaded",
+                                 action="store_true")
+        self.parser.add_argument("--dense_flat_grid",
+                                 help="if set, calculate dense cvo loss using flat-grid correspondence",
                                  action="store_true")
 
         # SYSTEM options

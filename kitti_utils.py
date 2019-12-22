@@ -68,6 +68,7 @@ def flip_lidar(velo_rect, P_rect_norm):
     ratio = (1-2*cx)/fx
     velo_flip = velo_rect.copy()
     velo_flip[:, 0] = -velo_rect[:, 0] + ratio * velo_rect[:, 2]
+    # ZMH: after this, need to -velo_rect[:, 2] / fx(real scale) if we are to project this point cloud to image plane
 
     return velo_flip
 
@@ -89,6 +90,10 @@ def project_lidar_to_img(pcl_lidar, P_rect_norm, im_shape, vel_depth=False):
 
     # check if in bounds
     # use minus 1 to get the exact same value as KITTI matlab code
+    # ZMH: In matlab code provided by KITTI (http://www.cvlibs.net/datasets/kitti/raw_data.php?type=calibration, https://s3.eu-central-1.amazonaws.com/avg-kitti/devkit_raw_data.zip), 
+    # the coordinate calculated after multiplication with projection matrix is directly used in plotting. We know that MATLAB use index starting from 1, 
+    # which means the projection matrix projects the left-most point in view to u=1. Here in python the index starts from 0, therefore 
+    # we should manually subtract one from the result after projection matrix, so that the coordinate still represents the same location in image. 
     velo_pts_im[:, 0] = np.round(velo_pts_im[:, 0]) - 1
     velo_pts_im[:, 1] = np.round(velo_pts_im[:, 1]) - 1
     val_inds = (velo_pts_im[:, 0] >= 0) & (velo_pts_im[:, 1] >= 0)

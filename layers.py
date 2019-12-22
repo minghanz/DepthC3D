@@ -159,27 +159,46 @@ class BackprojectDepth(nn.Module):
         self.id_coords = np.stack(meshgrid, axis=0).astype(np.float32)
         self.id_coords = nn.Parameter(torch.from_numpy(self.id_coords),
                                       requires_grad=False)
+        ## ZMH: 2*H*W
 
         self.ones = nn.Parameter(torch.ones(self.batch_size, 1, self.height * self.width),
                                  requires_grad=False)
 
         self.pix_coords = torch.unsqueeze(torch.stack(
-            [self.id_coords[0].view(-1), self.id_coords[1].view(-1)], 0), 0)
-        self.pix_coords = self.pix_coords.repeat(batch_size, 1, 1)
+            [self.id_coords[0].view(-1), self.id_coords[1].view(-1)], 0), 0)    ## ZMH: 1*2*N
+        self.pix_coords = self.pix_coords.repeat(batch_size, 1, 1)              ## ZMH: B*2*N
         self.pix_coords = nn.Parameter(torch.cat([self.pix_coords, self.ones], 1),
-                                       requires_grad=False)
+                                       requires_grad=False)                     ## ZMH: B*3*N
 
     def forward(self, depth, inv_K, separate=False, own_pix_coords=None, as_img=False):
+        if own_pix_coords is None:
+            pix_coords = self.pix_coords.clone()
+        else:
+            pix_coords = own_pix_coords.clone()
+        pix_coords[:,:2] = pix_coords[:,:2] + 1 ## ZMH: to make sure the pix coords is aligned with MATLAB format in which the projection matrix is defined. 
+
         if not separate:
-            if own_pix_coords is None:
-                cam_points = torch.matmul(inv_K[:, :3, :3], self.pix_coords)
-            else:
-                cam_points = torch.matmul(inv_K[:, :3, :3], own_pix_coords)
+            cam_points = torch.matmul(inv_K[:, :3, :3], pix_coords)
             cam_points = depth.view(self.batch_size, 1, -1) * cam_points
             cam_points = torch.cat([cam_points, self.ones], 1)
             if as_img:
-                cam_points = cam_points.view(self.batch_size, 4, self.height, self.width)
-            return cam_points # ZMH: B*4*N?
+                cam_points = cam_points.view(self.batch_size, 4, self.height, self.width) # ZMH: B*4*H*W
+                # cam_points_sep = {}
+                # pix_coords_sep = {}
+                # for i in range(self.batch_size):
+                #     depth_i = depth[i:i+1].view(1, 1, -1)
+                #     mask_i = (depth_i > 0).squeeze()
+                #     depth_i_sel = depth_i[..., mask_i] 
+                #     pix_coords_i = pix_coords[i:i+1]
+                #     pix_coords_i_sel = pix_coords_i[..., mask_i]
+                #     cam_points_i = cam_points[i:i+1].view(1, 4, -1)
+                #     cam_points_i_sel = cam_points_i[..., mask_i]
+
+                #     cam_points_sep[i] = cam_points_i_sel
+                #     pix_coords_sep[i] = pix_coords_i_sel
+                # return cam_points, cam_points_sep, pix_coords_sep
+
+            return cam_points # ZMH: B*4*N
         else:
             cam_points = {}
             masks = {}
@@ -192,10 +211,7 @@ class BackprojectDepth(nn.Module):
                 masks[i] = mask_i
                 depth_i_sel = depth_i[..., mask_i] 
                 # print("back_proj depth_i_sel shape", depth_i_sel.shape)
-                if own_pix_coords is None:
-                    pix_coords_i = self.pix_coords[i:i+1]
-                else:
-                    pix_coords_i = own_pix_coords[i,i+1]
+                pix_coords_i = pix_coords[i:i+1]
                 # print("back_proj pix_coords_i shape", pix_coords_i.shape)
 
                 pix_coords_i_sel = pix_coords_i[..., mask_i]
@@ -211,6 +227,8 @@ class BackprojectDepth(nn.Module):
                 cam_points_i = torch.cat([cam_points_i, ones_sel ], 1)
                 cam_points[i] = cam_points_i
 
+                # ZMH: each item in cam_points list is 1*4*N
+                # ZMH: each item in masks list is 1*1*N
             return cam_points, masks
 
 
@@ -233,10 +251,14 @@ class Project3D(nn.Module):
         pix_coords = cam_points[:, :2, :] / (cam_points[:, 2, :].unsqueeze(1) + self.eps)
         pix_coords = pix_coords.view(self.batch_size, 2, self.height, self.width)
         pix_coords = pix_coords.permute(0, 2, 3, 1)
+
+        # ZMH: before normalization the coords need to -1 to transform MATLAB format to python format
+        pix_coords[..., :2] = pix_coords[..., :2] - 1
+
         pix_coords[..., 0] /= self.width - 1
         pix_coords[..., 1] /= self.height - 1
         pix_coords = (pix_coords - 0.5) * 2
-        return pix_coords # ZMH: B*2*N?
+        return pix_coords # ZMH: B*H*W*2
 
 
 def upsample(x):
