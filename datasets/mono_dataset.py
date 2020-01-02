@@ -206,6 +206,7 @@ class MonoDataset(data.Dataset):
             color_aug = (lambda x: x)
 
         self.preprocess(inputs, color_aug)
+        # ZMH: the input color images are in range [0,1]
 
         for i in self.frame_idxs:
             del inputs[("color", i, -1)]

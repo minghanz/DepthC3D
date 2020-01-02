@@ -9,10 +9,23 @@ from __future__ import absolute_import, division, print_function
 from trainer import Trainer
 from options import MonodepthOptions
 
-options = MonodepthOptions()
-opts = options.parse()
 
+import sys
+import os
+script_path = os.path.dirname(__file__)
+sys.path.append(os.path.join(script_path, '../UPSNet'))
+from upsnet.config.config import config
+from wrap_to_panoptic import parse_args
+
+options = MonodepthOptions()
+opts, rest = options.parse()
+ups_arg = None
+if opts.use_panoptic:
+    ups_arg = parse_args(inputs=rest)
+    print("ups_arg:", ups_arg)
+
+print("train.py", config.dataset.num_classes)
 
 if __name__ == "__main__":
-    trainer = Trainer(opts)
+    trainer = Trainer(opts, ups_arg, config)
     trainer.train()

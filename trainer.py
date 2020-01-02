@@ -32,6 +32,11 @@ sys.path.append(os.path.join(script_path, '../pytorch-unet'))
 from geometry_plot import draw3DPts
 from geometry import gramian, kern_mat, rgb_to_hsv
 
+
+sys.path.append(os.path.join(script_path, '../UPSNet'))
+from upsnet.models import *
+from wrap_to_panoptic import to_panoptic, PanopVis
+
 import threading
 
 from cvo_utils import PtSampleInGrid
@@ -40,6 +45,9 @@ import torch
 torch.manual_seed(0)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+
+import warnings
+warnings.filterwarnings("ignore")
 
 def my_collate_fn(batch):
     batch_new = {}
@@ -52,7 +60,7 @@ def my_collate_fn(batch):
     return batch_new
 
 class Trainer:
-    def __init__(self, options):
+    def __init__(self, options, ups_arg, ups_cfg):
         self.opt = options
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
 
@@ -63,7 +71,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -125,6 +133,22 @@ class Trainer:
             self.parameters_to_train += list(self.models["predictive_mask"].parameters())
 
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
+
+        if self.opt.use_panoptic:
+            self.ups_cfg = ups_cfg # is none if self.opt.use_panoptic is None# create models
+            self.ups_arg = ups_arg
+            self.panoptic_model = eval(self.ups_cfg.symbol)().to(device=self.device)
+
+            # preparing
+            curr_iter = self.ups_cfg.test.test_iteration
+            if self.ups_arg.weight_path == '':
+                self.panoptic_model.load_state_dict(torch.load(os.path.join(os.path.join(os.path.join(self.ups_cfg.output_path, os.path.basename(self.ups_arg.cfg).split('.')[0]),
+                                        '_'.join(self.ups_cfg.dataset.image_set.split('+')), self.ups_cfg.model_prefix+str(curr_iter)+'.pth'))), resume=True)
+            else:
+                self.panoptic_model.load_state_dict(torch.load(self.ups_arg.weight_path), resume=True)
+
+            self.panop_visualizer = PanopVis(num_cls=50)
+
 
         # from apex import amp
         # model, optimizer = amp.initialize(model, optimizer, opt_level="O1") # 这里是“欧一”，不是“零一”
@@ -343,6 +367,27 @@ class Trainer:
                 features_others[i] = self.models["encoder"](inputs["color_aug", i, 0])
                 outputs_others[i] = self.models["depth"](features_others[i] )
 
+        if self.opt.use_panoptic:
+            for i in self.opt.frame_ids:
+                list_of_tuple_for_panop = to_panoptic(inputs["color", i, 0], self.ups_cfg)
+                list_of_panop_feature = []
+                for ib in range(self.opt.batch_size):
+                    panop_feature = self.panoptic_model( *( list_of_tuple_for_panop[ib] ) ) # 1*Catogories*H*W
+                    panop_feature = F.softmax(panop_feature, dim=1)
+                    list_of_panop_feature.append(panop_feature)
+                outputs[("panoptic", i, 0)] = list_of_panop_feature 
+                for scale in self.opt.scales:
+                    if scale == 0:
+                        continue
+                    outputs[("panoptic", i, scale)] = []
+                    for ib in range(self.opt.batch_size):
+                        rescaled_panop = F.interpolate(outputs[("panoptic", i, 0)][ib], scale_factor=0.5**scale)
+                        outputs[("panoptic", i, scale)].append(rescaled_panop)
+                # outputs["panoptic", i, 0] = torch.cat(list_of_panop_feature, dim=0) # This may not be viable because different images may have different number of instances
+
+                # mode = "train" if self.train_flag else "val"
+                # save_path = os.path.join(self.log_path, mode + '_' + self.ctime )
+                # self.panop_visualizer.paint(inputs["color", i, 0], outputs["panoptic", i, 0], save_path=save_path, step=self.step )
 
         if self.opt.predictive_mask:
             outputs["predictive_mask"] = self.models["predictive_mask"](features)
@@ -583,7 +628,10 @@ class Trainer:
         for i in range(self.opt.batch_size):
             mask_i = grid_valid[i].view(-1)
             for item in grid_info_dict:
-                info_i = grid_info_dict[item][i]
+                if isinstance(grid_info_dict[item], list):
+                    info_i = grid_info_dict[item][i][0]
+                else:
+                    info_i = grid_info_dict[item][i]
                 info_i = info_i.view(info_i.shape[0], -1)
                 info_i_sel = info_i[:, mask_i]
                 flat_info_dict[item][i] = info_i_sel.unsqueeze(0) # ZMH: 1*C*N
@@ -606,16 +654,23 @@ class Trainer:
                 outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask", frame_id, scale)] 
 
             outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)] = rgb_to_hsv(inputs[("color", frame_id, scale)], flat=False)
-                
+            if self.opt.use_panoptic:
+                outputs[("grid_panop", frame_id, scale, frame_id, gt_flag)] = outputs[("panoptic", frame_id, scale)]
+
             grid_info_dict = {}
             grid_info_dict["xyz"] = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
             grid_info_dict["uv"] = self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1) # ZMH: B*2*H*W
             grid_info_dict["hsv"] = outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)]
+            if self.opt.use_panoptic:
+                grid_info_dict["panop"] = outputs[("grid_panop", frame_id, scale, frame_id, gt_flag)]
+
             grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
             flat_info_dict = self.flat_from_grid(grid_valid, grid_info_dict)
             outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["xyz"]
             outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["uv"]
             outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["hsv"]
+            if self.opt.use_panoptic:
+                outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["panop"]
 
             combos_needed = None
 
@@ -635,6 +690,7 @@ class Trainer:
                     outputs[("flat_xyz", frame_id, scale, wrap_id, gt_flag)] = {}
                     outputs[("flat_uv", frame_id, scale, wrap_id, gt_flag)] = {}
                     outputs[("flat_hsv", frame_id, scale, wrap_id, gt_flag)] = {}
+                    outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)] = {}
                     for ib in range(self.opt.batch_size):
                         Ti = T[ib:ib+1]
                         Ki = inputs[("K", scale)][ib:ib+1, :3, :3]
@@ -652,21 +708,40 @@ class Trainer:
                         pix_coords = cam_uv_wrap[:, :2, :] / (cam_uv_wrap[:, 2, :].unsqueeze(1) + 1e-7) - 1 # ZMH: B*2*N
                         outputs[("flat_uv", frame_id, scale, wrap_id, gt_flag)][ib] = pix_coords.detach()
                         outputs[("flat_hsv", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)][ib]
+                        if self.opt.use_panoptic:
+                            outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)][ib]
 
 
     def concat_flat(self, outputs):
+        dict_for_new_item = {}
         for item in outputs:
             if "flat_" in item[0]:
                 to_cat = []
+                new_item = item
+                if "flat_uv" in item[0]:
+                    new_item = list(item)
+                    new_item[0] = "flat_uvb"
+                    new_item = tuple(new_item)
+
                 for ib in range(self.opt.batch_size):
                     if "flat_uv" in item[0]:
                         n_pts = outputs[item][ib].shape[-1]
                         frame_indicater = torch.ones((1,1,n_pts), dtype=outputs[item][ib].dtype, device=self.device) * ib
                         flat_iuv = torch.cat([outputs[item][ib], frame_indicater ], dim=1) # here requires_grad=False
                         to_cat.append(flat_iuv)
+                    elif "flat_panop" in item[0]:
+                        continue # Don't concatenate, because diff images may have diff # of channels # each item of the list has 1*C*N
                     else:
                         to_cat.append(outputs[item][ib])
-                outputs[item] = torch.cat(to_cat, dim=2)
+
+                if "flat_panop" not in item[0]:
+                    if new_item != item:
+                        dict_for_new_item[new_item] = torch.cat(to_cat, dim=2)
+                    else:
+                        outputs[new_item] = torch.cat(to_cat, dim=2)    # 1*C*(N1+...+Nb)
+        
+        for item in dict_for_new_item:
+            outputs[item] = dict_for_new_item[item]
                   
                     
     def inp_combo_from_dist_combo(self, dist_combos):
@@ -686,11 +761,12 @@ class Trainer:
         dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
         inp_combos = self.inp_combo_from_dist_combo(dist_combos)
 
-        feats_needed = ["xyz", "hsv"]
+        feats_needed = ["xyz", "hsv", "panop"]
         feats_ell = {}
-        feats_ell["xyz"] = 0.2
+        feats_ell["xyz"] = 0.1
         feats_ell["hsv"] = 0.2
-        neighbor_range = int(1)
+        feats_ell["panop"] = 0.2
+        neighbor_range = int(3)
         innerp_dict = {}
         for combo in inp_combos:
             flat_idx, grid_idx, flat_gt, grid_gt = combo
@@ -698,12 +774,30 @@ class Trainer:
                 innerp_singles = {}
                 for feat in feats_needed:
                     # pts, pts_info, grid_source, grid_valid, neighbor_range, ell
-                    flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)]
-                    flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)]
-                    grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
-                    grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)]
                     ell = float(feats_ell[feat])
-                    innerp_singles[feat] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
+                    if feat == "panop":
+                        inn_list = []
+                        for ib in range(self.opt.batch_size):
+                            grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)][ib:ib+1]
+                            flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)][ib]
+                            flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)][ib]
+                            grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)][ib]
+
+                            print("grid_valid.shape", grid_valid.shape)
+                            print("flat_uv.shape", flat_uv.shape)
+                            print("flat_info.shape", flat_info.shape)
+                            print("grid_info.shape", grid_info.shape)
+                            inn_single = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell, True)
+                            inn_list.append(inn_single)
+                            print("inn_single.shape", inn_single.shape)
+                        innerp_singles[feat] = torch.cat(inn_list, dim=2) #.contiguous()
+                    else:
+                        grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)]
+                        flat_uv = outputs[("flat_uvb", flat_idx, scale, grid_idx, flat_gt)]
+                        flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)]
+                        grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
+                        innerp_singles[feat] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
+                        print("innerp_singles[{}].shape".format(feat), innerp_singles[feat].shape)
                 if len(feats_needed) == 1:
                     innerp = innerp_singles[feats_needed[0]]
                 else:

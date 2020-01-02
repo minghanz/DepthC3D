@@ -169,6 +169,9 @@ class MonodepthOptions:
         self.parser.add_argument("--dense_flat_grid",
                                  help="if set, calculate dense cvo loss using flat-grid correspondence",
                                  action="store_true")
+        self.parser.add_argument("--use_panoptic",
+                                 help="if set, call panoptic network to produce features",
+                                 action="store_true")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",
@@ -241,5 +244,5 @@ class MonodepthOptions:
                                  action="store_true")
 
     def parse(self):
-        self.options = self.parser.parse_args()
-        return self.options
+        self.options, rest = self.parser.parse_known_args()
+        return self.options, rest
