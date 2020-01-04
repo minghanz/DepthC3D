@@ -39,7 +39,7 @@ from wrap_to_panoptic import to_panoptic, PanopVis
 
 import threading
 
-from cvo_utils import PtSampleInGrid
+from cvo_utils import PtSampleInGrid, PtSampleInGridAngle
 
 import torch
 torch.manual_seed(0)
@@ -71,7 +71,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -368,26 +368,31 @@ class Trainer:
                 outputs_others[i] = self.models["depth"](features_others[i] )
 
         if self.opt.use_panoptic:
-            for i in self.opt.frame_ids:
-                list_of_tuple_for_panop = to_panoptic(inputs["color", i, 0], self.ups_cfg)
-                list_of_panop_feature = []
-                for ib in range(self.opt.batch_size):
-                    panop_feature = self.panoptic_model( *( list_of_tuple_for_panop[ib] ) ) # 1*Catogories*H*W
-                    panop_feature = F.softmax(panop_feature, dim=1)
-                    list_of_panop_feature.append(panop_feature)
-                outputs[("panoptic", i, 0)] = list_of_panop_feature 
-                for scale in self.opt.scales:
-                    if scale == 0:
-                        continue
-                    outputs[("panoptic", i, scale)] = []
+            with torch.no_grad():
+                for i in self.opt.frame_ids:
+                    list_of_tuple_for_panop = to_panoptic(inputs["color", i, 0], self.ups_cfg)
+                    list_of_panop_feature = []
+                    list_of_seman_feature = []
                     for ib in range(self.opt.batch_size):
-                        rescaled_panop = F.interpolate(outputs[("panoptic", i, 0)][ib], scale_factor=0.5**scale)
-                        outputs[("panoptic", i, scale)].append(rescaled_panop)
-                # outputs["panoptic", i, 0] = torch.cat(list_of_panop_feature, dim=0) # This may not be viable because different images may have different number of instances
+                        panop_feature, seman_feature = self.panoptic_model( *( list_of_tuple_for_panop[ib] ) ) # 1*Catogories*H*W
+                        panop_feature = F.softmax(panop_feature, dim=1)
+                        seman_feature = F.softmax(seman_feature, dim=1)
+                        list_of_panop_feature.append(panop_feature)
+                        list_of_seman_feature.append(seman_feature)
+                    outputs[("panoptic", i, 0)] = list_of_panop_feature 
+                    outputs[("semantic", i, 0)] = torch.cat(list_of_seman_feature, dim=0) # This may not be viable fpr panop because different images may have different number of instances
+                    for scale in self.opt.scales:
+                        if scale == 0:
+                            continue
+                        outputs[("semantic", i, scale)] = F.interpolate(outputs[("semantic", i, 0)], scale_factor=0.5**scale)
+                        outputs[("panoptic", i, scale)] = []
+                        for ib in range(self.opt.batch_size):
+                            rescaled_panop = F.interpolate(outputs[("panoptic", i, 0)][ib], scale_factor=0.5**scale)
+                            outputs[("panoptic", i, scale)].append(rescaled_panop)
 
-                # mode = "train" if self.train_flag else "val"
-                # save_path = os.path.join(self.log_path, mode + '_' + self.ctime )
-                # self.panop_visualizer.paint(inputs["color", i, 0], outputs["panoptic", i, 0], save_path=save_path, step=self.step )
+                    # mode = "train" if self.train_flag else "val"
+                    # save_path = os.path.join(self.log_path, mode + '_' + self.ctime )
+                    # self.panop_visualizer.paint(inputs["color", i, 0], outputs["panoptic", i, 0], save_path=save_path, step=self.step )
 
         if self.opt.predictive_mask:
             outputs["predictive_mask"] = self.models["predictive_mask"](features)
@@ -656,6 +661,7 @@ class Trainer:
             outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)] = rgb_to_hsv(inputs[("color", frame_id, scale)], flat=False)
             if self.opt.use_panoptic:
                 outputs[("grid_panop", frame_id, scale, frame_id, gt_flag)] = outputs[("panoptic", frame_id, scale)]
+                outputs[("grid_seman", frame_id, scale, frame_id, gt_flag)] = outputs[("semantic", frame_id, scale)]
 
             grid_info_dict = {}
             grid_info_dict["xyz"] = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
@@ -663,6 +669,7 @@ class Trainer:
             grid_info_dict["hsv"] = outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)]
             if self.opt.use_panoptic:
                 grid_info_dict["panop"] = outputs[("grid_panop", frame_id, scale, frame_id, gt_flag)]
+                grid_info_dict["seman"] = outputs[("grid_seman", frame_id, scale, frame_id, gt_flag)]
 
             grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
             flat_info_dict = self.flat_from_grid(grid_valid, grid_info_dict)
@@ -671,6 +678,7 @@ class Trainer:
             outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["hsv"]
             if self.opt.use_panoptic:
                 outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["panop"]
+                outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["seman"]  
 
             combos_needed = None
 
@@ -691,6 +699,7 @@ class Trainer:
                     outputs[("flat_uv", frame_id, scale, wrap_id, gt_flag)] = {}
                     outputs[("flat_hsv", frame_id, scale, wrap_id, gt_flag)] = {}
                     outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)] = {}
+                    outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)] = {}
                     for ib in range(self.opt.batch_size):
                         Ti = T[ib:ib+1]
                         Ki = inputs[("K", scale)][ib:ib+1, :3, :3]
@@ -710,6 +719,7 @@ class Trainer:
                         outputs[("flat_hsv", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)][ib]
                         if self.opt.use_panoptic:
                             outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)][ib]
+                            outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)][ib]
 
 
     def concat_flat(self, outputs):
@@ -756,87 +766,127 @@ class Trainer:
             if combo1 not in inp_combos:
                 inp_combos.append(combo1)
         return inp_combos
+    
+    def inp_feat_combo_from_dist_combo(self, dist_combos):
+        inp_feat_combos = set()
+        for combo in dist_combos:
+            id0, id1, gt0, gt1 = combo
+            if id0 == id1:
+                feats_needed = self.feats_self
+            else:
+                feats_needed = self.feats_cross
+            for feat in feats_needed:
+                combo01 = (id0, id1, gt0, gt1, feat)
+                combo00 = (id0, id0, gt0, gt0, feat)
+                combo11 = (id1, id1, gt1, gt1, feat)
+                inp_feat_combos.add(combo01)
+                inp_feat_combos.add(combo00)
+                inp_feat_combos.add(combo11)
+        # print("inp_feat_combos:", inp_feat_combos)
+        return inp_feat_combos
+
+
 
     def get_innerp_from_grid_flat(self, outputs):
-        dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
-        inp_combos = self.inp_combo_from_dist_combo(dist_combos)
+        self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
+        # inp_combos = self.inp_combo_from_dist_combo(dist_combos)
 
-        feats_needed = ["xyz", "hsv", "panop"]
+        self.feats_cross = ["xyz", "seman"]
+        self.feats_self = ["xyz", "panop"]
+        inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
+
+        # feats_needed = ["xyz", "hsv"]
         feats_ell = {}
         feats_ell["xyz"] = 0.1
         feats_ell["hsv"] = 0.2
         feats_ell["panop"] = 0.2
-        neighbor_range = int(3)
-        innerp_dict = {}
-        for combo in inp_combos:
-            flat_idx, grid_idx, flat_gt, grid_gt = combo
-            for scale in self.opt.scales:
-                innerp_singles = {}
-                for feat in feats_needed:
-                    # pts, pts_info, grid_source, grid_valid, neighbor_range, ell
-                    ell = float(feats_ell[feat])
-                    if feat == "panop":
-                        inn_list = []
-                        for ib in range(self.opt.batch_size):
-                            grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)][ib:ib+1]
-                            flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)][ib]
-                            flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)][ib]
-                            grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)][ib]
-
-                            print("grid_valid.shape", grid_valid.shape)
-                            print("flat_uv.shape", flat_uv.shape)
-                            print("flat_info.shape", flat_info.shape)
-                            print("grid_info.shape", grid_info.shape)
-                            inn_single = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell, True)
-                            inn_list.append(inn_single)
-                            print("inn_single.shape", inn_single.shape)
-                        innerp_singles[feat] = torch.cat(inn_list, dim=2) #.contiguous()
-                    else:
-                        grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)]
-                        flat_uv = outputs[("flat_uvb", flat_idx, scale, grid_idx, flat_gt)]
-                        flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)]
-                        grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
-                        innerp_singles[feat] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
-                        print("innerp_singles[{}].shape".format(feat), innerp_singles[feat].shape)
-                if len(feats_needed) == 1:
-                    innerp = innerp_singles[feats_needed[0]]
-                else:
-                    innerp = innerp_singles[feats_needed[0]] * innerp_singles[feats_needed[1]]
-                    if len(feats_needed) > 2:
-                        for feat in feats_needed[2:]:
-                            innerp = innerp * innerp_singles[feat]
-                innerp_sum = innerp.sum()
-                item_name = str(combo)+"s"+str(scale)
-                innerp_dict[item_name] = innerp_sum
+        feats_ell["seman"] = 0.2
         
-        dist_dict, cos_dict = self.get_dist_from_inp_grid_flat(dist_combos, innerp_dict)
+        neighbor_range = int(3)
+        inp_feat_dict = {}
+        for combo in inp_feat_combos:
+            inp_feat_dict[combo] = {}
+            flat_idx, grid_idx, flat_gt, grid_gt, feat = combo      # using the frame of grid_idx
+            for scale in self.opt.scales:
+                # pts, pts_info, grid_source, grid_valid, neighbor_range, ell
+                ell = float(feats_ell[feat])
+                if feat == "panop":
+                    inn_list = []
+                    for ib in range(self.opt.batch_size):
+                        grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)][ib:ib+1]
+                        flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)][ib]
+                        flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)][ib]
+                        grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)][ib]
 
-        return innerp_dict, dist_dict, cos_dict
+                        # print("grid_valid.shape", grid_valid.shape)
+                        # print("flat_uv.shape", flat_uv.shape)
+                        # print("flat_info.shape", flat_info.shape)
+                        # print("grid_info.shape", grid_info.shape)
+                        inn_single = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell, True)
+                        inn_list.append(inn_single)
+                        # print("inn_single.shape", inn_single.shape)
+                    inp_feat_dict[combo][scale] = torch.cat(inn_list, dim=2) #1 * NN * N
+                else:
+                    grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)]
+                    flat_uv = outputs[("flat_uvb", flat_idx, scale, grid_idx, flat_gt)]
+                    flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)]
+                    grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
+                    inp_feat_dict[combo][scale] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
+                    # print("inp_feat_dict[{}][{}].shape".format(combo, scale), inp_feat_dict[combo][scale].shape)
 
-    def get_dist_from_inp_grid_flat(self, dist_combos, innerp_dict):
+        
+        inp_dict, dist_dict, cos_dict = self.get_dist_from_inp_grid_flat(self.dist_combos, inp_feat_dict)
+
+        return inp_dict, dist_dict, cos_dict
+
+    def get_dist_from_inp_grid_flat(self, dist_combos, inp_feat_dict):
+        innerp_dict = {} # building blocks for the other three
         dist_dict = {}
         cos_dict = {}
+        inp_dict = {}
         for combo in dist_combos:
             id0, id1, gt0, gt1 = combo
             combo0 = (id0, id0, gt0, gt0)
             combo1 = (id1, id1, gt1, gt1)
-            for scale in self.opt.scales:
-                item_name = "{}s{}"
-                dist_dict[item_name.format(combo, scale)] = innerp_dict[item_name.format(combo0, scale)] + innerp_dict[item_name.format(combo1, scale)] - 2 * innerp_dict[item_name.format(combo, scale)]
-                cos_dict[item_name.format(combo, scale)] = 1 - innerp_dict[item_name.format(combo, scale)] / torch.sqrt(innerp_dict[item_name.format(combo0, scale)] * innerp_dict[item_name.format(combo1, scale)] )
-        
-        return dist_dict, cos_dict
+            if id0 == id1:
+                feats = self.feats_self
+                flag = "self"
+            else:
+                feats = self.feats_cross
+                flag = "cross"
+            tags = []
+            tags.append((combo, flag))
+            tags.append((combo0, flag))
+            tags.append((combo1, flag))
+            for tag in tags:
+                if tag in innerp_dict:
+                    continue
+                innerp_dict[tag] = {}
+                combo_, _ = tag
+                for scale in self.opt.scales:
+                    cat_feat = torch.cat([inp_feat_dict[(*combo_, feat)][scale] for feat in feats], dim=0)
+                    innerp_dict[tag][scale] = torch.prod(cat_feat, dim=0).sum()
 
-    def reg_cvo_to_loss(self, losses, innerp_dict, dist_dict, cos_dict):
+            dist_dict[combo] = {}
+            cos_dict[combo] = {}
+            inp_dict[combo] = {}
+            for scale in self.opt.scales:
+                inp_dict[combo][scale] = innerp_dict[tags[0]][scale]
+                dist_dict[combo][scale] = innerp_dict[tags[1]][scale] + innerp_dict[tags[2]][scale] - 2 * innerp_dict[tags[0]][scale]
+                cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale] )
+
+        return inp_dict, dist_dict, cos_dict
+
+    def reg_cvo_to_loss(self, losses, inp_dict, dist_dict, cos_dict):
         losses["loss_cvo/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
         losses["loss_cos/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
         losses["loss_inp/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
         for scale in self.opt.scales:
             for frame_id in self.opt.frame_ids:
-                item_name = "(0, {}, True, False)s{}"
-                losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[item_name.format(frame_id, scale)]
-                losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[item_name.format(frame_id, scale)]
-                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = innerp_dict[item_name.format(frame_id, scale)]
+                combo_ = (0, frame_id, True, False)
+                losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[combo_][scale]
+                losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[combo_][scale]
+                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
                 losses["loss_cvo/sum"] += losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_cos/sum"] += losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_inp/sum"] += losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]
