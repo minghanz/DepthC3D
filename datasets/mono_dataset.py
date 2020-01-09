@@ -94,7 +94,7 @@ class MonoDataset(data.Dataset):
         # ### for dilation operation to generate mask for valid pixels
         self.dilate_struct = {}
         for i in range(self.num_scales):
-            scale_d = max(5 - 2*i, 1)
+            scale_d = max(35 - 8*i, 1) # 5
             self.dilate_struct[i] = np.ones((scale_d, scale_d))
 
     def preprocess(self, inputs, color_aug):
@@ -206,6 +206,7 @@ class MonoDataset(data.Dataset):
             color_aug = (lambda x: x)
 
         self.preprocess(inputs, color_aug)
+        # ZMH: the input color images are in range [0,1]
 
         for i in self.frame_idxs:
             del inputs[("color", i, -1)]
@@ -251,7 +252,9 @@ class MonoDataset(data.Dataset):
 
                     ### generate mask from the lidar points
                     # mask = binary_dilation(depth_gt, self.dilate_struct[j])
-                    mask = binary_closing(depth_gt, self.dilate_struct[j])
+                    mask = depth_gt.copy()
+                    mask[int(new_h/2):] = 1
+                    mask = binary_closing(mask, self.dilate_struct[j])
                     mask = np.expand_dims(mask, 0)
                     inputs[("depth_mask", i, j)] = torch.from_numpy(mask)
 

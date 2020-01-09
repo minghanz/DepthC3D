@@ -172,6 +172,9 @@ class MonodepthOptions:
         self.parser.add_argument("--mask_samp_as_lidar",
                                  help="if set, the mask for image is sampled to have the same number of valid points as lidar projection mask",
                                  action="store_true")
+        self.parser.add_argument("--use_panoptic",
+                                 help="if set, call panoptic network to produce features",
+                                 action="store_true")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",
@@ -244,5 +247,5 @@ class MonodepthOptions:
                                  action="store_true")
 
     def parse(self):
-        self.options = self.parser.parse_args()
-        return self.options
+        self.options, rest = self.parser.parse_known_args()
+        return self.options, rest
