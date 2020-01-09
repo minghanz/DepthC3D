@@ -24,7 +24,6 @@ if opts.use_panoptic:
     ups_arg = parse_args(inputs=rest)
     print("ups_arg:", ups_arg)
 
-print("train.py", config.dataset.num_classes)
 
 if __name__ == "__main__":
     trainer = Trainer(opts, ups_arg, config)

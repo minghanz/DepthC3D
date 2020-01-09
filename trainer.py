@@ -71,7 +71,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -698,8 +698,9 @@ class Trainer:
                     outputs[("flat_xyz", frame_id, scale, wrap_id, gt_flag)] = {}
                     outputs[("flat_uv", frame_id, scale, wrap_id, gt_flag)] = {}
                     outputs[("flat_hsv", frame_id, scale, wrap_id, gt_flag)] = {}
-                    outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)] = {}
-                    outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)] = {}
+                    if self.opt.use_panoptic:
+                        outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)] = {}
+                        outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)] = {}
                     for ib in range(self.opt.batch_size):
                         Ti = T[ib:ib+1]
                         Ki = inputs[("K", scale)][ib:ib+1, :3, :3]
@@ -791,18 +792,22 @@ class Trainer:
         self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
         # inp_combos = self.inp_combo_from_dist_combo(dist_combos)
 
-        self.feats_cross = ["xyz", "seman"]
-        self.feats_self = ["xyz", "panop"]
+        if self.opt.use_panoptic:
+            self.feats_cross = ["xyz", "seman"]
+            self.feats_self = ["xyz", "panop"]
+        else:
+            self.feats_cross = ["xyz", "hsv"]
+            self.feats_self = ["xyz", "hsv"]
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
 
         # feats_needed = ["xyz", "hsv"]
         feats_ell = {}
         feats_ell["xyz"] = 0.1
         feats_ell["hsv"] = 0.2
-        feats_ell["panop"] = 0.2
-        feats_ell["seman"] = 0.2
+        feats_ell["panop"] = 0.2    # in Angle mode this is not needed
+        feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
-        neighbor_range = int(3)
+        neighbor_range = int(2)
         inp_feat_dict = {}
         for combo in inp_feat_combos:
             inp_feat_dict[combo] = {}
@@ -822,7 +827,7 @@ class Trainer:
                         # print("flat_uv.shape", flat_uv.shape)
                         # print("flat_info.shape", flat_info.shape)
                         # print("grid_info.shape", grid_info.shape)
-                        inn_single = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell, True)
+                        inn_single = PtSampleInGridAngle.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, True) # PtSampleInGrid
                         inn_list.append(inn_single)
                         # print("inn_single.shape", inn_single.shape)
                     inp_feat_dict[combo][scale] = torch.cat(inn_list, dim=2) #1 * NN * N
@@ -831,9 +836,11 @@ class Trainer:
                     flat_uv = outputs[("flat_uvb", flat_idx, scale, grid_idx, flat_gt)]
                     flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)]
                     grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
-                    inp_feat_dict[combo][scale] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
+                    if feat == "seman":
+                        inp_feat_dict[combo][scale] = PtSampleInGridAngle.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range)
+                    else:
+                        inp_feat_dict[combo][scale] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
                     # print("inp_feat_dict[{}][{}].shape".format(combo, scale), inp_feat_dict[combo][scale].shape)
-
         
         inp_dict, dist_dict, cos_dict = self.get_dist_from_inp_grid_flat(self.dist_combos, inp_feat_dict)
 
@@ -871,7 +878,7 @@ class Trainer:
             cos_dict[combo] = {}
             inp_dict[combo] = {}
             for scale in self.opt.scales:
-                inp_dict[combo][scale] = innerp_dict[tags[0]][scale]
+                inp_dict[combo][scale] = - innerp_dict[tags[0]][scale] # fixed Jan 6!
                 dist_dict[combo][scale] = innerp_dict[tags[1]][scale] + innerp_dict[tags[2]][scale] - 2 * innerp_dict[tags[0]][scale]
                 cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale] )
 
