@@ -169,6 +169,9 @@ class MonodepthOptions:
         self.parser.add_argument("--dense_flat_grid",
                                  help="if set, calculate dense cvo loss using flat-grid correspondence",
                                  action="store_true")
+        self.parser.add_argument("--mask_samp_as_lidar",
+                                 help="if set, the mask for image is sampled to have the same number of valid points as lidar projection mask",
+                                 action="store_true")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",

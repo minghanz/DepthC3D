@@ -175,10 +175,11 @@ class Trainer:
             val_dataset, self.opt.batch_size, True,
             num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
         self.val_iter = iter(self.val_loader)
+        self.val_count = 0
 
         self.writers = {}
         self.ctime = time.ctime()
-        for mode in ["train", "val"]:
+        for mode in ["train", "val", "val_set"]:
             # self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
             self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode + '_' + self.ctime))
 
@@ -234,6 +235,7 @@ class Trainer:
                 self.run_epoch()
                 if (self.epoch + 1) % self.opt.save_frequency == 0:
                     self.save_model()
+                self.val_set()
 
     def run_epoch(self):
         """Run a single epoch of training and validation
@@ -242,17 +244,17 @@ class Trainer:
         print("Training")
         self.set_train()
 
-        for batch_idx, inputs in enumerate(self.train_loader):
+        for self.batch_idx, inputs in enumerate(self.train_loader):
 
             before_op_time = time.time()
-            # if batch_idx < 20000:
+            # if self.batch_idx < 20000:
             #     self.geo_scale = 1
-            # elif batch_idx < 40000:
+            # elif self.batch_idx < 40000:
             #     self.geo_scale = 0.5
             # else:
             #     self.geo_scale = 0.1
             self.geo_scale = 0.1
-            self.show_range = batch_idx % 1000 == 0
+            self.show_range = self.batch_idx % 1000 == 0
 
             outputs, losses = self.process_batch(inputs)
 
@@ -263,7 +265,7 @@ class Trainer:
             # losses["loss"].backward()
             # self.model_optimizer.step()
 
-            if batch_idx > 0 and batch_idx % self.opt.iters_per_update == 0:
+            if self.batch_idx > 0 and self.batch_idx % self.opt.iters_per_update == 0:
                     self.model_optimizer.step()
                     self.model_optimizer.zero_grad()
                     # print('optimizer update at', iter_overall)
@@ -279,8 +281,8 @@ class Trainer:
             if self.opt.disp_in_loss:
                 loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
             if self.opt.supervised_by_gt_depth:
-                # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
-                loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
+                # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
             if self.opt.sup_cvo_pose_lidar:
                 loss += 0.1 * losses["loss_pose/cos_sum"] / self.num_scales / self.opt.iters_per_update
             loss.backward()
@@ -289,11 +291,11 @@ class Trainer:
             duration = time.time() - before_op_time
 
             # log less frequently after the first 2000 steps to save time & disk space
-            early_phase = batch_idx % self.opt.log_frequency == 0 and self.step < 2000
+            early_phase = self.batch_idx % self.opt.log_frequency == 0 and self.step < 2000
             late_phase = self.step % 2000 == 0
 
             if early_phase or late_phase:
-                self.log_time(batch_idx, duration, losses["loss"].cpu().data)
+                self.log_time(self.batch_idx, duration, losses["loss"].cpu().data)
 
                 if "depth_gt" in inputs:
                     self.compute_depth_losses(inputs, outputs, losses)
@@ -429,6 +431,9 @@ class Trainer:
         except StopIteration:
             self.val_iter = iter(self.val_loader)
             inputs = self.val_iter.next()
+            self.val_count = 0
+
+        self.val_count += 1
 
         with torch.no_grad():
             outputs, losses = self.process_batch(inputs)
@@ -438,8 +443,45 @@ class Trainer:
 
             self.log("val", inputs, outputs, losses)
             del inputs, outputs, losses
+            print("Step:", self.step, "; Val_count:", self.val_count, "Epoch:", self.epoch, "Batch_idx:", self.batch_idx)
 
         self.set_train()
+
+    def val_set(self):
+        self.set_eval()
+        print("------------------")
+        print("Evaluating on the whole validating set at Epoch {}...".format(self.epoch))
+        losses_sum = {}
+        val_start_time = time.time()
+        with torch.no_grad():
+            self.geo_scale = 0.1
+            self.show_range = False
+            for batch_idx, inputs in enumerate(self.val_loader):
+                outputs, losses = self.process_batch(inputs)
+                if "depth_gt" in inputs:
+                    self.compute_depth_losses(inputs, outputs, losses)
+
+                for l, v in losses.items():
+                    if batch_idx == 0:
+                        losses_sum[l] = torch.tensor(0, dtype=torch.float32, device=self.device )
+                    if type(v) != type(losses_sum[l]):
+                        v = torch.tensor(v, dtype=torch.float32, device=self.device )
+                    losses_sum[l] += v
+
+                if batch_idx % 200 == 0:
+                    print("Passed {} mini-batches in {:.2f} secs.".format(batch_idx, time.time()-val_start_time) )
+
+            val_end_time = time.time()
+            print("Val time: {:.2f}".format(val_end_time - val_start_time) )
+            print("Total # of mini-batches in val set:", batch_idx+1)
+            for l, v in losses_sum.items():
+                losses_sum[l] = v / (batch_idx+1)
+                print("{}: {:.2f}".format(l, losses_sum[l].item() ) ) # use .item to transform the 0-dim tensor to a python number      
+            
+            self.log("val_set", inputs, outputs, losses_sum)
+
+        self.set_train()
+        print("--------------------")
 
     ### ZMH: make it a function to be repeated for images other than index 0
     def from_disp_to_depth(self, disp, scale, force_multiscale=False):
@@ -593,17 +635,48 @@ class Trainer:
     def get_grid_flat(self, frame_id, scale, inputs, outputs):
         #### Generate: [pts (B*2*N), pts_info (B*C*N), grid_source (B*C*H*W), grid_valid (B*1*H*W)] in self frame and host frame
         #### outputs[("pts", frame_id, scale, frame_cd, gt_or_not)]
+
+        ## if need sampling in mask
+        if self.opt.mask_samp_as_lidar:
+            # n_pts = inputs[("depth_mask_gt", frame_id, scale)].sum()
+            mask_idx = inputs[("depth_mask_gt", frame_id, scale)].nonzero() # depth_mask
+            from_n_pts = mask_idx.shape[0]
+            n_pts = from_n_pts * 0.5
+            idx_sample = torch.randperm(from_n_pts)[:int(n_pts)]
+
+            mask_idx_sample = mask_idx[idx_sample]
+            mask_idx_sample = mask_idx_sample.split(1, dim=1)
+            mask_sp = torch.zeros_like(inputs[("depth_mask_gt", frame_id, scale)]) # depth_mask
+            mask_sp[mask_idx_sample] = True
+            inputs[("depth_mask_gt_sp", frame_id, scale)] = mask_sp
+
+            mask_idx = inputs[("depth_mask", frame_id, scale)].nonzero()
+            from_n_pts = mask_idx.shape[0]
+            idx_sample = torch.randperm(from_n_pts)[:int(n_pts)]
+
+            mask_idx_sample = mask_idx[idx_sample]
+            mask_idx_sample = mask_idx_sample.split(1, dim=1)
+            mask_sp = torch.zeros_like(inputs[("depth_mask", frame_id, scale)])
+            mask_sp[mask_idx_sample] = True
+            inputs[("depth_mask_sp", frame_id, scale)] = mask_sp
+
         for gt_flag in [True, False]:
             if gt_flag: 
                 cam_pts_grid = self.backproject_depth[scale](
                     inputs[("depth_gt_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
                 outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)] = cam_pts_grid[:,:3] # ZMH: B*3*H*W
-                outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask_gt", frame_id, scale)]  # ZMH: B*1*H*W
+                if self.opt.mask_samp_as_lidar:
+                    outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask_gt_sp", frame_id, scale)] 
+                else:
+                    outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask_gt", frame_id, scale)]  # ZMH: B*1*H*W
             else:
                 cam_pts_grid = self.backproject_depth[scale](
                     outputs[("depth_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
                 outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)] = cam_pts_grid[:,:3]
-                outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask", frame_id, scale)] 
+                if self.opt.mask_samp_as_lidar:
+                    outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask_sp", frame_id, scale)]
+                else:
+                    outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask", frame_id, scale)] 
 
             outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)] = rgb_to_hsv(inputs[("color", frame_id, scale)], flat=False)
                 
@@ -688,9 +761,9 @@ class Trainer:
 
         feats_needed = ["xyz", "hsv"]
         feats_ell = {}
-        feats_ell["xyz"] = 0.2
+        feats_ell["xyz"] = 0.1
         feats_ell["hsv"] = 0.2
-        neighbor_range = int(1)
+        neighbor_range = int(5)
         innerp_dict = {}
         for combo in inp_combos:
             flat_idx, grid_idx, flat_gt, grid_gt = combo
@@ -742,7 +815,7 @@ class Trainer:
                 item_name = "(0, {}, True, False)s{}"
                 losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[item_name.format(frame_id, scale)]
                 losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[item_name.format(frame_id, scale)]
-                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = innerp_dict[item_name.format(frame_id, scale)]
+                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - innerp_dict[item_name.format(frame_id, scale)] # fixed Jan 6!
                 losses["loss_cvo/sum"] += losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_cos/sum"] += losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_inp/sum"] += losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]
@@ -1023,7 +1096,7 @@ class Trainer:
                 outputs[("color", frame_id, scale)] = F.grid_sample(
                     inputs[("color", frame_id, source_scale)],
                     outputs[("sample", frame_id, scale)],
-                    padding_mode="border")
+                    padding_mode="border", align_corners=True)
                 ## ZMH: generate depth of other images
                 if self.opt.cvo_loss:# and frame_id == -1:
 
@@ -1048,17 +1121,17 @@ class Trainer:
                         outputs[("depth_wrap", frame_id, scale)] = F.grid_sample(
                             outputs[("depth_scale", frame_id, scale)],
                             outputs[("sample_wrap", frame_id, scale)],
-                            padding_mode="border")
+                            padding_mode="border", align_corners=True)
 
                         outputs[("color_wrap", frame_id, scale)] = F.grid_sample(
                             inputs[("color", frame_id, scale)],
                             outputs[("sample_wrap", frame_id, scale)],
-                            padding_mode="border")
+                            padding_mode="border", align_corners=True)
 
                         outputs[("uv_wrap", frame_id, scale)] = F.grid_sample(
                             self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
                             outputs[("sample_wrap", frame_id, scale)],
-                            padding_mode="border")          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
+                            padding_mode="border", align_corners=True)          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
                         
                         self.gen_pcl_wrap_other(inputs, outputs, scale, frame_id, T_inv, masks)
 
@@ -1702,6 +1775,9 @@ class Trainer:
         for l, v in losses.items():
             writer.add_scalar("{}".format(l), v, self.step)
 
+        if mode == "val_set":
+            return
+
         for j in range(min(4, self.opt.batch_size)):  # write a maxmimum of four images
             for s in self.opt.scales:
                 for frame_id in self.opt.frame_ids:
@@ -1730,6 +1806,14 @@ class Trainer:
                 writer.add_image(
                     "disp_{}/mask_{}".format(s, j),
                     inputs[("depth_mask", 0, s)][j], self.step)
+
+                if self.opt.mask_samp_as_lidar:
+                    writer.add_image(
+                        "disp_{}/masksp_{}".format(s, j),
+                        inputs[("depth_mask_sp", 0, s)][j], self.step)
+                    writer.add_image(
+                        "disp_{}/maskgtsp_{}".format(s, j),
+                        inputs[("depth_mask_gt_sp", 0, s)][j], self.step)
                 
 
                 if self.opt.predictive_mask:
