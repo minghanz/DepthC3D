@@ -63,6 +63,8 @@ class Trainer:
     def __init__(self, options, ups_arg, ups_cfg):
         self.opt = options
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
+        torch_vs = (torch.__version__).split('.')
+        self.torch_version = float(torch_vs[0]) + 0.1 * float(torch_vs[1])
 
         # checking height and width are multiples of 32
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
@@ -1244,10 +1246,16 @@ class Trainer:
 
                 outputs[("sample", frame_id, scale)] = pix_coords
 
-                outputs[("color", frame_id, scale)] = F.grid_sample(
-                    inputs[("color", frame_id, source_scale)],
-                    outputs[("sample", frame_id, scale)],
-                    padding_mode="border", align_corners=True)
+                if self.torch_version <= 1.2:
+                    outputs[("color", frame_id, scale)] = F.grid_sample(
+                        inputs[("color", frame_id, source_scale)],
+                        outputs[("sample", frame_id, scale)],
+                        padding_mode="border")
+                else:
+                    outputs[("color", frame_id, scale)] = F.grid_sample(
+                        inputs[("color", frame_id, source_scale)],
+                        outputs[("sample", frame_id, scale)],
+                        padding_mode="border", align_corners=True)
                 ## ZMH: generate depth of other images
                 if self.opt.cvo_loss:# and frame_id == -1:
 
@@ -1269,20 +1277,36 @@ class Trainer:
                             cam_points_curscale, inputs[("K", scale)], T)
                         outputs[("sample_wrap", frame_id, scale)] = pix_coords_curscale
 
-                        outputs[("depth_wrap", frame_id, scale)] = F.grid_sample(
-                            outputs[("depth_scale", frame_id, scale)],
-                            outputs[("sample_wrap", frame_id, scale)],
-                            padding_mode="border", align_corners=True)
+                        if self.torch_version <= 1.2:
+                            outputs[("depth_wrap", frame_id, scale)] = F.grid_sample(
+                                outputs[("depth_scale", frame_id, scale)],
+                                outputs[("sample_wrap", frame_id, scale)],
+                                padding_mode="border")
 
-                        outputs[("color_wrap", frame_id, scale)] = F.grid_sample(
-                            inputs[("color", frame_id, scale)],
-                            outputs[("sample_wrap", frame_id, scale)],
-                            padding_mode="border", align_corners=True)
+                            outputs[("color_wrap", frame_id, scale)] = F.grid_sample(
+                                inputs[("color", frame_id, scale)],
+                                outputs[("sample_wrap", frame_id, scale)],
+                                padding_mode="border")
 
-                        outputs[("uv_wrap", frame_id, scale)] = F.grid_sample(
-                            self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
-                            outputs[("sample_wrap", frame_id, scale)],
-                            padding_mode="border", align_corners=True)          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
+                            outputs[("uv_wrap", frame_id, scale)] = F.grid_sample(
+                                self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
+                                outputs[("sample_wrap", frame_id, scale)],
+                                padding_mode="border")          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
+                        else:
+                            outputs[("depth_wrap", frame_id, scale)] = F.grid_sample(
+                                outputs[("depth_scale", frame_id, scale)],
+                                outputs[("sample_wrap", frame_id, scale)],
+                                padding_mode="border", align_corners=True)
+
+                            outputs[("color_wrap", frame_id, scale)] = F.grid_sample(
+                                inputs[("color", frame_id, scale)],
+                                outputs[("sample_wrap", frame_id, scale)],
+                                padding_mode="border", align_corners=True)
+
+                            outputs[("uv_wrap", frame_id, scale)] = F.grid_sample(
+                                self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
+                                outputs[("sample_wrap", frame_id, scale)],
+                                padding_mode="border", align_corners=True)          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
                         
                         self.gen_pcl_wrap_other(inputs, outputs, scale, frame_id, T_inv, masks)
 
