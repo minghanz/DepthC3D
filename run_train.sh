@@ -5,8 +5,11 @@
 
 #### train using self-supervised, monitor pose cvo loss usign lidar points
 CUDA_LAUNCH_BLOCKING=1 python train.py --model_name mono_model_KITTI_Lidar --log_frequency 100 \
---batch_size 2 --iters_per_update 4 --scheduler_step_size 10  --cvo_loss  --disp_in_loss --min_depth 3 --num_layers 50 --cvo_loss_dense --dense_flat_grid --supervised_by_gt_depth --num_workers 6 # --mask_samp_as_lidar\
-#--use_panoptic --cfg /home/minghanz/UPSNet/upsnet/experiments/upsnet_resnet50_cityscapes_1gpu.yaml --weight_path /home/minghanz/UPSNet/model/upsnet_resnet_50_cityscapes_12000.pth
+--batch_size 2 --iters_per_update 4 --scheduler_step_size 10  --cvo_loss  --disp_in_loss --min_depth 3 --num_layers 50 --num_workers 6 --cvo_loss_dense --dense_flat_grid --supervised_by_gt_depth \
+--load_weights_folder "/workspace/repos/monodepth2/tmp/mono_model_KITTI_Lidar/models_Mon Jan  6 19:36:14 2020/weights_5"
+# --cvo_loss_dense --dense_flat_grid --supervised_by_gt_depth
+# --use_panoptic --cfg /home/minghanz/UPSNet/upsnet/experiments/upsnet_resnet50_cityscapes_1gpu.yaml --weight_path /home/minghanz/UPSNet/model/upsnet_resnet_50_cityscapes_12000.pth
+# --mask_samp_as_lidar
 # --sup_cvo_pose_lidar  --multithread
 #--cvo_loss_dense \
 #--load_weights_folder "/home/minghanz/tmp/mono_model_KITTI_Lidar/models_Sun Dec  1 22:36:45 2019/weights_0" # --num_layers 34#--cvo_loss_dense --ref_depth 10 # --sup_cvo_pose_lidar --supervised_by_gt_depth
