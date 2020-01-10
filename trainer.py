@@ -307,8 +307,8 @@ class Trainer:
             if self.opt.disp_in_loss:
                 loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
             if self.opt.supervised_by_gt_depth:
-                loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
-                # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
+                loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
             if self.opt.sup_cvo_pose_lidar:
                 loss += 0.1 * losses["loss_pose/cos_sum"] / self.num_scales / self.opt.iters_per_update
             loss.backward()
@@ -864,7 +864,8 @@ class Trainer:
 
 
     def get_innerp_from_grid_flat(self, outputs):
-        self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
+        # self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
+        self.dist_combos = [(0, 1, False, False), (0, -1, False, False)]
         # inp_combos = self.inp_combo_from_dist_combo(dist_combos)
 
         if self.opt.use_panoptic:
@@ -877,12 +878,12 @@ class Trainer:
 
         # feats_needed = ["xyz", "hsv"]
         feats_ell = {}
-        feats_ell["xyz"] = 0.1
+        feats_ell["xyz"] = 0.05
         feats_ell["hsv"] = 0.2
         feats_ell["panop"] = 0.2    # in Angle mode this is not needed
         feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
-        neighbor_range = int(2)
+        neighbor_range = int(1)
         inp_feat_dict = {}
         for combo in inp_feat_combos:
             inp_feat_dict[combo] = {}
@@ -965,7 +966,9 @@ class Trainer:
         losses["loss_inp/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
         for scale in self.opt.scales:
             for frame_id in self.opt.frame_ids:
-                combo_ = (0, frame_id, True, False)
+                if frame_id == 0:
+                    continue
+                combo_ = (0, frame_id, False, False)
                 losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[combo_][scale]
                 losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[combo_][scale]
                 losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
