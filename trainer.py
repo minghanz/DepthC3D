@@ -30,7 +30,7 @@ import sys
 script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, '../pytorch-unet'))
 from geometry_plot import draw3DPts
-from geometry import gramian, kern_mat, rgb_to_hsv
+from geometry import gramian, kern_mat, rgb_to_hsv, hsv_to_rgb
 
 
 sys.path.append(os.path.join(script_path, '../UPSNet'))
@@ -48,6 +48,8 @@ torch.backends.cudnn.benchmark = False
 
 import warnings
 warnings.filterwarnings("ignore")
+
+import math
 
 def my_collate_fn(batch):
     batch_new = {}
@@ -307,8 +309,8 @@ class Trainer:
             if self.opt.disp_in_loss:
                 loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
             if self.opt.supervised_by_gt_depth:
-                # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
-                loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
+                # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
             if self.opt.sup_cvo_pose_lidar:
                 loss += 0.1 * losses["loss_pose/cos_sum"] / self.num_scales / self.opt.iters_per_update
             loss.backward()
@@ -797,6 +799,101 @@ class Trainer:
                             outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)][ib]
                             outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)][ib]
 
+        #### generate depth normal and confidence
+        ### 1. generate patches of points and valid map
+        self.halfw_normal = 2
+        self.kern_normal = (2*self.halfw_normal+1, 2*self.halfw_normal+1)
+        self.equi_dist = 0.05
+        # gt_flag = False
+
+        num_in_kern = self.kern_normal[0]*self.kern_normal[1]
+        xyz_grid = outputs[("grid_xyz", frame_id, scale, frame_id, False)]
+        xyz_patches = F.unfold(xyz_grid, self.kern_normal, padding=self.halfw_normal) # B*(C*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
+        xyz_patches = xyz_patches.reshape(self.opt.batch_size, 3, num_in_kern, -1).transpose(1,3) # B*(H*W)*N*3
+
+        valid_grid = outputs[("grid_valid", frame_id, scale, frame_id, False)]
+        valid_grid = torch.ones_like(valid_grid).to(dtype=torch.float32)
+
+        if True: #not gt_flag:
+            valid_patches = F.unfold(valid_grid, self.kern_normal, padding=self.halfw_normal) # B*(1*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
+            valid_patches = valid_patches.reshape(self.opt.batch_size, 1, num_in_kern, -1).transpose(1,3).to(dtype=torch.bool) # B*(H*W)*N*1
+            # valid_patches = torch.ones([xyz_patches.shape[0], xyz_patches.shape[1], xyz_patches.shape[2], 1], dtype=torch.bool, device=self.device) ## TODO: should consider padding
+
+            valid_n_pts = valid_patches.sum(dim=2).to(dtype=torch.float32) # B*(H*W)*1
+            valid_patches_expand = valid_patches.expand_as(xyz_patches) # B*(H*W)*N*3
+
+        ### weight
+        xyz_center = xyz_patches[:,:,[(num_in_kern-1)/2]] # B*(H*W)*1*3
+        dist = torch.norm(xyz_patches - xyz_center, dim=3) # B*(H*W)*N
+        min_dist = torch.ones_like(dist) * self.equi_dist
+        dist = torch.where(dist > min_dist, dist, min_dist)
+        # dist = dist / self.equi_dist
+        W_flat = 1/dist
+        # W_diag = torch.diag_embed(W_flat) # B*(H*W)*N*N # this will cost a lot of memory
+        W_flat = W_flat.unsqueeze(-1)   # B*(H*W)*N*1
+        W_flat_3 = W_flat.expand_as(xyz_patches)
+        # W_flat = torch.ones_like(W_flat)
+        W_flat_sqrt = torch.sqrt(W_flat)
+        W_flat_3_sqrt = torch.sqrt(W_flat_3)
+
+        ### 2. mask to only keep valid points
+        if True: #not gt_flag:
+            zero_patches = torch.zeros_like(xyz_patches) # B*(H*W)*N*3
+            xyz_patches = torch.where(valid_patches_expand, xyz_patches, zero_patches)
+
+        ### 3. reshape as n_pt * c
+        ### 4. calc ATA, check inverse condition, substitude invalid tiles to diagonals
+        # xyz_patches_t = xyz_patches.transpose(2,3) # B*(H*W)*3*N
+
+        xyz_patches_w = xyz_patches * W_flat_3_sqrt
+        xyz_patches_t_w = xyz_patches_w.transpose(2,3)
+        
+        # ATA = torch.matmul(xyz_patches_t, xyz_patches) # B*(H*W)*3*3
+        ATA = torch.matmul(xyz_patches_t_w, xyz_patches_w ) # B*(H*W)*3*3
+        detATA = torch.det(ATA) # B*(H*W)
+        inverse_condition = (detATA > 1e-5).unsqueeze(-1).unsqueeze(-1).expand_as(ATA) # B*(H*W)*3*3
+        
+        diag = torch.diag(torch.ones(3, device=self.device)).view(1,1,3,3).expand_as(ATA)
+        ATA_valid = torch.where(inverse_condition, ATA, diag)
+
+        ### 5. calc (ATA)^(-1)AT1 on valid tiles
+        inv_ATA = torch.inverse(ATA_valid) # # B*(H*W)*3*3
+        ones_b = torch.ones((xyz_patches.shape[0], xyz_patches.shape[1], xyz_patches.shape[2], 1), device=self.device) # B*(H*W)*N*1
+        # normal = torch.matmul(inv_ATA, torch.matmul(xyz_patches_t, ones_b) ) # B*(H*W)*3*1
+        normal = torch.matmul(inv_ATA, torch.matmul(xyz_patches_t_w, ones_b*W_flat_sqrt ) ) # B*(H*W)*3*1
+        # normal_norm = torch.norm(normal, dim=2, keepdim=True)
+        # print("normal_norm min:", float(normal_norm.min()), "max:", float(normal_norm.max()), "mean:", float(normal_norm.mean()), "median:", float(normal_norm.median()) )
+        normed_normal = normal / (torch.norm(normal, dim=2, keepdim=True)+1e-6) # B*(H*W)*3*1
+
+        ### 6. calc error of Aw-1
+        target_b = torch.matmul(xyz_center, normed_normal) # B*(H*W)*1*1
+        residual = (torch.matmul(xyz_patches, normed_normal) - target_b ) * W_flat  # essentially res/dist = sin angle
+        # residual = torch.matmul(xyz_patches, normal) - ones_b # B*(H*W)*N*1
+        
+        if True: #not gt_flag:
+            zero_residuals = torch.zeros_like(residual)
+            residual = torch.where(valid_patches, residual, zero_residuals)
+
+        res_rmsq = torch.sqrt( (residual.pow(2) * W_flat ).sum(dim=2) / valid_n_pts) # B*(H*W)*1
+
+        ### 7. going back to flat/grid
+        outputs[("grid_normal", frame_id, scale, frame_id, False)] = normed_normal.squeeze(-1).transpose(1,2).reshape( [self.opt.batch_size, 3, xyz_grid.shape[-2], xyz_grid.shape[-1]] ) # B*3*H*W
+        outputs[("grid_normal_res", frame_id, scale, frame_id, False)] = res_rmsq.transpose(1,2).reshape( [self.opt.batch_size, 1, xyz_grid.shape[-2], xyz_grid.shape[-1]] ) # B*1*H*W
+        
+        # norm_vis = outputs[("grid_normal", frame_id, scale, frame_id, False)][:, 0:2] # B*2*H*W
+        # norm_S = norm_vis.norm(dim=1) # [0,1]
+        # norm_H = ( torch.atan2(norm_vis[:,0], norm_vis[:,1]) / math.pi + 1)/2 # [0,1]
+        # norm_V = ( outputs[("grid_normal", frame_id, scale, frame_id, False)][:, 2] + 1 )/2
+        # norm_HSV = torch.stack([norm_H, norm_S, norm_V], dim=1) # B*3*H*W
+        # outputs[("grid_normal_vis", frame_id, scale, frame_id, False)] = hsv_to_rgb(norm_HSV, flat=False)
+
+        outputs[("grid_normal_vis", frame_id, scale, frame_id, False)] = outputs[("grid_normal", frame_id, scale, frame_id, False)] * 0.5 + 0.5
+        # outputs[("grid_normal_vis", frame_id, scale, frame_id, False)] = outputs[("grid_normal", frame_id, scale, frame_id, False)]
+        
+        print("normal_res min:", float(res_rmsq.min()), "max:", float(res_rmsq.max()), "mean:", float(res_rmsq.mean()), "median:", float(res_rmsq.median()) )
+        # print("normed_normal min:", float(normed_normal.min()), "max:", float(normed_normal.max()), "mean:", float(normed_normal.mean()), "median:", float(normed_normal.median()) )
+        # print("valid_n_pts min:", float(valid_n_pts.min()), "max:", float(valid_n_pts.max()), "mean:", float(valid_n_pts.mean()), "median:", float(valid_n_pts.median()) )
+
 
     def concat_flat(self, outputs):
         dict_for_new_item = {}
@@ -883,7 +980,7 @@ class Trainer:
         feats_ell["panop"] = 0.2    # in Angle mode this is not needed
         feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
-        neighbor_range = int(1)
+        neighbor_range = int(0)
         inp_feat_dict = {}
         for combo in inp_feat_combos:
             inp_feat_dict[combo] = {}
@@ -1992,6 +2089,14 @@ class Trainer:
                     writer.add_image(
                         "disp_{}/maskgtsp_{}".format(s, j),
                         inputs[("depth_mask_gt_sp", 0, s)][j], self.step)
+
+                if self.opt.dense_flat_grid:
+                    writer.add_image(
+                        "normal_{}/dir_{}".format(s, j),
+                        outputs[("grid_normal_vis", 0, s, 0, False)][j], self.step)
+                    writer.add_image(
+                        "normal_{}/res_{}".format(s, j),
+                        normalize_image(outputs[("grid_normal_res", 0, s, 0, False)][j]), self.step)
                 
 
                 if self.opt.predictive_mask:
