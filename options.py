@@ -175,6 +175,9 @@ class MonodepthOptions:
         self.parser.add_argument("--use_panoptic",
                                  help="if set, call panoptic network to produce features",
                                  action="store_true")
+        self.parser.add_argument("--use_normal",
+                                 help="if set, calc normal vectors from depth and used in cvo calculation",
+                                 action="store_true")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",

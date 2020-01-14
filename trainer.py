@@ -39,7 +39,7 @@ from wrap_to_panoptic import to_panoptic, PanopVis
 
 import threading
 
-from cvo_utils import PtSampleInGrid, PtSampleInGridAngle
+from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal
 
 import torch
 torch.manual_seed(0)
@@ -75,7 +75,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -309,8 +309,8 @@ class Trainer:
             if self.opt.disp_in_loss:
                 loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
             if self.opt.supervised_by_gt_depth:
-                loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
-                # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
+                loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
             if self.opt.sup_cvo_pose_lidar:
                 loss += 0.1 * losses["loss_pose/cos_sum"] / self.num_scales / self.opt.iters_per_update
             loss.backward()
@@ -748,6 +748,11 @@ class Trainer:
                 grid_info_dict["panop"] = outputs[("grid_panop", frame_id, scale, frame_id, gt_flag)]
                 grid_info_dict["seman"] = outputs[("grid_seman", frame_id, scale, frame_id, gt_flag)]
 
+            if self.opt.use_normal:
+                self.normal_from_depth(frame_id, scale, outputs, gt_flag)
+                grid_info_dict["normal"] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)]
+                grid_info_dict["nres"] = outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)]
+
             grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
             flat_info_dict = self.flat_from_grid(grid_valid, grid_info_dict)
             outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["xyz"]
@@ -756,6 +761,10 @@ class Trainer:
             if self.opt.use_panoptic:
                 outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["panop"]
                 outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["seman"]  
+
+            if self.opt.use_normal:
+                outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["normal"]  
+                outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["nres"] 
 
             combos_needed = None
 
@@ -778,6 +787,9 @@ class Trainer:
                     if self.opt.use_panoptic:
                         outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)] = {}
                         outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)] = {}
+                    if self.opt.use_normal:
+                        outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)] = {}
+                        outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)] = {}
                     for ib in range(self.opt.batch_size):
                         Ti = T[ib:ib+1]
                         Ki = inputs[("K", scale)][ib:ib+1, :3, :3]
@@ -799,23 +811,40 @@ class Trainer:
                             outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)][ib]
                             outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)][ib]
 
+                        if self.opt.use_normal:
+                            if frame_id == 0:
+                                Ri = Ti[:, :3, :3]
+                            else:
+                                Ri = Ti_inv[:, :3, :3]
+                            outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)][ib] = torch.matmul(Ri, outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)][ib])
+                            outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)][ib]
+
+
+    def normal_from_depth(self, frame_id, scale, outputs, gt_flag):
         #### generate depth normal and confidence
         ### 1. generate patches of points and valid map
-        self.halfw_normal = 2
+        self.halfw_normal = 2 # from the visualization, using 2 results in large residual in closer part of image
         self.kern_normal = (2*self.halfw_normal+1, 2*self.halfw_normal+1)
+        self.kern_dilat = 1
         self.equi_dist = 0.05
-        # gt_flag = False
+        # self.ref_nres = 0.1
+        # self.ref_nres_sqrt = math.sqrt(self.ref_nres)
+        self.res_mag_max = 2
+        self.res_mag_min = 0.1
+        self.norm_in_dist = True
 
         num_in_kern = self.kern_normal[0]*self.kern_normal[1]
-        xyz_grid = outputs[("grid_xyz", frame_id, scale, frame_id, False)]
-        xyz_patches = F.unfold(xyz_grid, self.kern_normal, padding=self.halfw_normal) # B*(C*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
+        xyz_grid = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
+        xyz_patches = F.unfold(xyz_grid, self.kern_normal, padding=self.halfw_normal*self.kern_dilat, dilation=self.kern_dilat) # B*(C*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
         xyz_patches = xyz_patches.reshape(self.opt.batch_size, 3, num_in_kern, -1).transpose(1,3) # B*(H*W)*N*3
 
-        valid_grid = outputs[("grid_valid", frame_id, scale, frame_id, False)]
-        valid_grid = torch.ones_like(valid_grid).to(dtype=torch.float32)
+        if gt_flag:
+            valid_grid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)].to(dtype=torch.float32)
+        else:
+            valid_grid = torch.ones_like(outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]).to(dtype=torch.float32)
 
         if True: #not gt_flag:
-            valid_patches = F.unfold(valid_grid, self.kern_normal, padding=self.halfw_normal) # B*(1*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
+            valid_patches = F.unfold(valid_grid, self.kern_normal, padding=self.halfw_normal*self.kern_dilat, dilation=self.kern_dilat) # B*(1*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
             valid_patches = valid_patches.reshape(self.opt.batch_size, 1, num_in_kern, -1).transpose(1,3).to(dtype=torch.bool) # B*(H*W)*N*1
             # valid_patches = torch.ones([xyz_patches.shape[0], xyz_patches.shape[1], xyz_patches.shape[2], 1], dtype=torch.bool, device=self.device) ## TODO: should consider padding
 
@@ -828,13 +857,19 @@ class Trainer:
         min_dist = torch.ones_like(dist) * self.equi_dist
         dist = torch.where(dist > min_dist, dist, min_dist)
         # dist = dist / self.equi_dist
-        W_flat = 1/dist
+        W_flat = 1/dist.unsqueeze(-1)   # B*(H*W)*N*1
         # W_diag = torch.diag_embed(W_flat) # B*(H*W)*N*N # this will cost a lot of memory
-        W_flat = W_flat.unsqueeze(-1)   # B*(H*W)*N*1
-        W_flat_3 = W_flat.expand_as(xyz_patches)
+        # W_flat = W_flat.unsqueeze(-1)   # B*(H*W)*N*1
+        # W_flat_3 = W_flat.expand_as(xyz_patches)
         # W_flat = torch.ones_like(W_flat)
+
         W_flat_sqrt = torch.sqrt(W_flat)
-        W_flat_3_sqrt = torch.sqrt(W_flat_3)
+
+        if True:
+            zero_vecs = torch.zeros_like(W_flat)
+            W_flat = torch.where(valid_patches, W_flat, zero_vecs)
+            W_flat_sqrt = torch.where(valid_patches, W_flat_sqrt, zero_vecs)
+            W_flat_3_sqrt = W_flat_sqrt.expand_as(xyz_patches)
 
         ### 2. mask to only keep valid points
         if True: #not gt_flag:
@@ -871,26 +906,39 @@ class Trainer:
         # residual = torch.matmul(xyz_patches, normal) - ones_b # B*(H*W)*N*1
         
         if True: #not gt_flag:
-            zero_residuals = torch.zeros_like(residual)
-            residual = torch.where(valid_patches, residual, zero_residuals)
+            residual = torch.where(valid_patches, residual, zero_vecs)
 
-        res_rmsq = torch.sqrt( (residual.pow(2) * W_flat ).sum(dim=2) / valid_n_pts) # B*(H*W)*1
+        # W_sum = W_flat.sum(dim=2)
+        # print("W_sum min:", float(W_sum.min()), "max:", float(W_sum.max()), "mean:", float(W_sum.mean()), "median:", float(W_sum.median()) )
+        # res_sum = (residual.pow(2) * W_flat ).sum(dim=2)
+        # print("res_sum min:", float(res_sum.min()), "max:", float(res_sum.max()), "mean:", float(res_sum.mean()), "median:", float(res_sum.median()) )
+        # if res_sum.min() <0:
+        #     raise ValueError("res_sum.min() <0!")
+        
+        ## rmsq error
+        # res_rmsq = torch.sqrt( (residual.pow(2) * W_flat ).sum(dim=2) / (W_flat.sum(dim=2)+1e-6) ) # instead of divided by valid_n_pts # B*(H*W)*1 # the ratio might be too large
+        ## sqrt of mean abs with clamp
+        # res_rmsq = torch.sqrt( torch.clamp((residual.abs() * W_flat).sum(dim=2) / (W_flat.sum(dim=2)+1e-6), min=0.01*self.ref_nres) )  # use clamp to avoid nan in back prop
+        ## sqrt of mean abs
+        # res_rmsq = torch.sqrt( (residual.abs() * W_flat).sum(dim=2) / (W_flat.sum(dim=2)+1e-6) )  # instead of divided by valid_n_pts # B*(H*W)*1 # will result in nan in back prop
+        # mean abs
+        res_rmsq = (residual.abs() * W_flat).sum(dim=2) / (W_flat.sum(dim=2)+1e-6)  # later use b/(b/t+x) to restrict the range
 
         ### 7. going back to flat/grid
-        outputs[("grid_normal", frame_id, scale, frame_id, False)] = normed_normal.squeeze(-1).transpose(1,2).reshape( [self.opt.batch_size, 3, xyz_grid.shape[-2], xyz_grid.shape[-1]] ) # B*3*H*W
-        outputs[("grid_normal_res", frame_id, scale, frame_id, False)] = res_rmsq.transpose(1,2).reshape( [self.opt.batch_size, 1, xyz_grid.shape[-2], xyz_grid.shape[-1]] ) # B*1*H*W
+        outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] = normed_normal.squeeze(-1).transpose(1,2).reshape( [self.opt.batch_size, 3, xyz_grid.shape[-2], xyz_grid.shape[-1]] ) # B*3*H*W
+        outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)] = res_rmsq.transpose(1,2).reshape( [self.opt.batch_size, 1, xyz_grid.shape[-2], xyz_grid.shape[-1]] ) # B*1*H*W
         
-        # norm_vis = outputs[("grid_normal", frame_id, scale, frame_id, False)][:, 0:2] # B*2*H*W
+        # norm_vis = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)][:, 0:2] # B*2*H*W
         # norm_S = norm_vis.norm(dim=1) # [0,1]
         # norm_H = ( torch.atan2(norm_vis[:,0], norm_vis[:,1]) / math.pi + 1)/2 # [0,1]
-        # norm_V = ( outputs[("grid_normal", frame_id, scale, frame_id, False)][:, 2] + 1 )/2
+        # norm_V = ( outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)][:, 2] + 1 )/2
         # norm_HSV = torch.stack([norm_H, norm_S, norm_V], dim=1) # B*3*H*W
-        # outputs[("grid_normal_vis", frame_id, scale, frame_id, False)] = hsv_to_rgb(norm_HSV, flat=False)
+        # outputs[("grid_normal_vis", frame_id, scale, frame_id, gt_flag)] = hsv_to_rgb(norm_HSV, flat=False)
 
-        outputs[("grid_normal_vis", frame_id, scale, frame_id, False)] = outputs[("grid_normal", frame_id, scale, frame_id, False)] * 0.5 + 0.5
-        # outputs[("grid_normal_vis", frame_id, scale, frame_id, False)] = outputs[("grid_normal", frame_id, scale, frame_id, False)]
+        outputs[("grid_normal_vis", frame_id, scale, frame_id, gt_flag)] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] * 0.5 + 0.5
+        # outputs[("grid_normal_vis", frame_id, scale, frame_id, gt_flag)] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)]
         
-        print("normal_res min:", float(res_rmsq.min()), "max:", float(res_rmsq.max()), "mean:", float(res_rmsq.mean()), "median:", float(res_rmsq.median()) )
+        # print("normal_res min:", float(res_rmsq.min()), "max:", float(res_rmsq.max()), "mean:", float(res_rmsq.mean()), "median:", float(res_rmsq.median()) ) # 0~1 as a sin angle
         # print("normed_normal min:", float(normed_normal.min()), "max:", float(normed_normal.max()), "mean:", float(normed_normal.mean()), "median:", float(normed_normal.median()) )
         # print("valid_n_pts min:", float(valid_n_pts.min()), "max:", float(valid_n_pts.max()), "mean:", float(valid_n_pts.mean()), "median:", float(valid_n_pts.median()) )
 
@@ -980,7 +1028,7 @@ class Trainer:
         feats_ell["panop"] = 0.2    # in Angle mode this is not needed
         feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
-        neighbor_range = int(0)
+        neighbor_range = int(1)
         inp_feat_dict = {}
         for combo in inp_feat_combos:
             inp_feat_dict[combo] = {}
@@ -1011,8 +1059,34 @@ class Trainer:
                     grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
                     if feat == "seman":
                         inp_feat_dict[combo][scale] = PtSampleInGridAngle.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range)
+                    elif feat == "xyz" and self.opt.use_normal:
+                        flat_normal = outputs[("flat_normal", flat_idx, scale, grid_idx, flat_gt)].contiguous()
+                        grid_normal = outputs[("grid_normal", grid_idx, scale, grid_idx, grid_gt)].contiguous()
+                        flat_nres = outputs[("flat_nres", flat_idx, scale, grid_idx, flat_gt)].contiguous()
+                        grid_nres = outputs[("grid_nres", grid_idx, scale, grid_idx, grid_gt)].contiguous()
+                        inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
+                            flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.res_mag_max, self.res_mag_min, False, self.norm_in_dist)
                     else:
                         inp_feat_dict[combo][scale] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
+
+                        ### print stats of distances
+                        # if feat == "xyz" and flat_gt == False and grid_gt == False :
+                            
+                        #     zs = inp_feat_dict[combo][scale]==0
+                        #     inp_feat_dict[combo][scale][zs] = 100
+                        #     print(inp_feat_dict[combo][scale].min())
+                            # stats[0] = float(inp_feat_dict[combo][scale].min())
+                            # stats[1] = float(inp_feat_dict[combo][scale].max())
+                            # stats[2] = float(inp_feat_dict[combo][scale].median())
+                            # stats[3] = float(inp_feat_dict[combo][scale].mean())
+                            # print("{} to {} pred stats:".format(flat_idx, grid_idx), stats[0], stats[1], stats[2], stats[3])
+
+                            # max_dist = - math.log(float(inp_feat_dict[combo][scale].max())) * 2*ell*ell
+                            # median_dist = - math.log(float(inp_feat_dict[combo][scale].median())) * 2*ell*ell
+                            # mean_dist = - math.log(float(inp_feat_dict[combo][scale].mean())) * 2*ell*ell
+                            # # min_dist = - math.log(float(inp_feat_dict[combo][scale].min())) * 2*ell*ell
+                            # print("{} to {} pred stats:".format(flat_idx, grid_idx), max_dist, median_dist, mean_dist)
+
                     # print("inp_feat_dict[{}][{}].shape".format(combo, scale), inp_feat_dict[combo][scale].shape)
         
         inp_dict, dist_dict, cos_dict = self.get_dist_from_inp_grid_flat(self.dist_combos, inp_feat_dict)
@@ -1054,6 +1128,7 @@ class Trainer:
                 inp_dict[combo][scale] = - innerp_dict[tags[0]][scale] # fixed Jan 6!
                 dist_dict[combo][scale] = innerp_dict[tags[1]][scale] + innerp_dict[tags[2]][scale] - 2 * innerp_dict[tags[0]][scale]
                 cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale] )
+                # cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( torch.max( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale], torch.zeros_like(innerp_dict[tags[2]][scale])+1e-7 ) )
 
         return inp_dict, dist_dict, cos_dict
 
@@ -1276,7 +1351,8 @@ class Trainer:
             inp_ii = innerps[((i,i), scale, (gt_i, gt_i))]
             inp_jj = innerps[((j,j), scale, (gt_j, gt_j))]
             f_dist = inp_ii + inp_jj - 2 * inp
-            cos_sim = 1 - inp/torch.sqrt(inp_ii * inp_jj)
+            cos_sim = 1 - inp/torch.sqrt( inp_ii * inp_jj )
+            # cos_sim = 1 - inp/torch.sqrt( torch.max(inp_ii * inp_jj, torch.zeros_like(inp_ii)+1e-7) )
         
         return inp, f_dist, cos_sim
 
@@ -1439,6 +1515,7 @@ class Trainer:
     def loss_from_inner_prod(self, inner_prods):
         f1_f2_dist = inner_prods[(0,0)] + inner_prods[(1,1)] - 2 * inner_prods[(0,1)]
         cos_similarity = 1 - inner_prods[(0,1)] / torch.sqrt( inner_prods[(0,0)] * inner_prods[(1,1)] )
+        # cos_similarity = 1 - inner_prods[(0,1)] / torch.sqrt( torch.max(inner_prods[(0,0)] * inner_prods[(1,1)], torch.zeros_like(inner_prods[(0,0)])+1e-7 ) )
 
         return f1_f2_dist, cos_similarity
 
@@ -2090,13 +2167,22 @@ class Trainer:
                         "disp_{}/maskgtsp_{}".format(s, j),
                         inputs[("depth_mask_gt_sp", 0, s)][j], self.step)
 
-                if self.opt.dense_flat_grid:
+                if self.opt.use_normal:
                     writer.add_image(
                         "normal_{}/dir_{}".format(s, j),
                         outputs[("grid_normal_vis", 0, s, 0, False)][j], self.step)
                     writer.add_image(
                         "normal_{}/res_{}".format(s, j),
-                        normalize_image(outputs[("grid_normal_res", 0, s, 0, False)][j]), self.step)
+                        outputs[("grid_nres", 0, s, 0, False)][j], self.step)
+                        # normalize_image(outputs[("grid_nres", 0, s, 0, False)][j]), self.step)
+
+                    writer.add_image(
+                        "normal_{}/dir_gt_{}".format(s, j),
+                        outputs[("grid_normal_vis", 0, s, 0, True)][j], self.step)
+                    writer.add_image(
+                        "normal_{}/res_gt_{}".format(s, j),
+                        outputs[("grid_nres", 0, s, 0, True)][j], self.step)
+                        # normalize_image(outputs[("grid_nres", 0, s, 0, True)][j]), self.step)
                 
 
                 if self.opt.predictive_mask:
