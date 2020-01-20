@@ -75,7 +75,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -310,7 +310,8 @@ class Trainer:
                 loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
             if self.opt.supervised_by_gt_depth:
                 # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
-                loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                loss += losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
             if self.opt.sup_cvo_pose_lidar:
                 loss += 0.1 * losses["loss_pose/cos_sum"] / self.num_scales / self.opt.iters_per_update
             loss.backward()
@@ -825,17 +826,20 @@ class Trainer:
         ### 1. generate patches of points and valid map
         self.halfw_normal = 2 # from the visualization, using 2 results in large residual in closer part of image
         self.kern_normal = (2*self.halfw_normal+1, 2*self.halfw_normal+1)
-        self.kern_dilat = 1
+        if gt_flag:
+            kern_dilat = 2
+        else:
+            kern_dilat = 1
         self.equi_dist = 0.05
         # self.ref_nres = 0.1
         # self.ref_nres_sqrt = math.sqrt(self.ref_nres)
         self.res_mag_max = 2
         self.res_mag_min = 0.1
-        self.norm_in_dist = True
+        self.norm_in_dist = False
 
         num_in_kern = self.kern_normal[0]*self.kern_normal[1]
         xyz_grid = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
-        xyz_patches = F.unfold(xyz_grid, self.kern_normal, padding=self.halfw_normal*self.kern_dilat, dilation=self.kern_dilat) # B*(C*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
+        xyz_patches = F.unfold(xyz_grid, self.kern_normal, padding=self.halfw_normal*kern_dilat, dilation=kern_dilat) # B*(C*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
         xyz_patches = xyz_patches.reshape(self.opt.batch_size, 3, num_in_kern, -1).transpose(1,3) # B*(H*W)*N*3
 
         if gt_flag:
@@ -844,7 +848,7 @@ class Trainer:
             valid_grid = torch.ones_like(outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]).to(dtype=torch.float32)
 
         if True: #not gt_flag:
-            valid_patches = F.unfold(valid_grid, self.kern_normal, padding=self.halfw_normal*self.kern_dilat, dilation=self.kern_dilat) # B*(1*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
+            valid_patches = F.unfold(valid_grid, self.kern_normal, padding=self.halfw_normal*kern_dilat, dilation=kern_dilat) # B*(1*(2*self.halfw_normal+1)*(2*self.halfw_normal+1))*(H*W)
             valid_patches = valid_patches.reshape(self.opt.batch_size, 1, num_in_kern, -1).transpose(1,3).to(dtype=torch.bool) # B*(H*W)*N*1
             # valid_patches = torch.ones([xyz_patches.shape[0], xyz_patches.shape[1], xyz_patches.shape[2], 1], dtype=torch.bool, device=self.device) ## TODO: should consider padding
 
@@ -1009,8 +1013,8 @@ class Trainer:
 
 
     def get_innerp_from_grid_flat(self, outputs):
-        # self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
-        self.dist_combos = [(0, 1, False, False), (0, -1, False, False)]
+        self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
+        # self.dist_combos = [(0, 1, False, False), (0, -1, False, False)]
         # inp_combos = self.inp_combo_from_dist_combo(dist_combos)
 
         if self.opt.use_panoptic:
@@ -1022,11 +1026,11 @@ class Trainer:
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
 
         # feats_needed = ["xyz", "hsv"]
-        feats_ell = {}
-        feats_ell["xyz"] = 0.05
-        feats_ell["hsv"] = 0.2
-        feats_ell["panop"] = 0.2    # in Angle mode this is not needed
-        feats_ell["seman"] = 0.2    # in Angle mode this is not needed
+        self.feats_ell = {}
+        self.feats_ell["xyz"] = 0.05
+        self.feats_ell["hsv"] = 0.2
+        self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
+        self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
         neighbor_range = int(1)
         inp_feat_dict = {}
@@ -1035,7 +1039,7 @@ class Trainer:
             flat_idx, grid_idx, flat_gt, grid_gt, feat = combo      # using the frame of grid_idx
             for scale in self.opt.scales:
                 # pts, pts_info, grid_source, grid_valid, neighbor_range, ell
-                ell = float(feats_ell[feat])
+                ell = float(self.feats_ell[feat])
                 if feat == "panop":
                     inn_list = []
                     for ib in range(self.opt.batch_size):
@@ -1125,7 +1129,8 @@ class Trainer:
             cos_dict[combo] = {}
             inp_dict[combo] = {}
             for scale in self.opt.scales:
-                inp_dict[combo][scale] = - innerp_dict[tags[0]][scale] # fixed Jan 6!
+                # inp_dict[combo][scale] = - innerp_dict[tags[0]][scale] # fixed Jan 6!
+                inp_dict[combo][scale] = innerp_dict[tags[0]][scale] # Jan 16: no neg here with log!
                 dist_dict[combo][scale] = innerp_dict[tags[1]][scale] + innerp_dict[tags[2]][scale] - 2 * innerp_dict[tags[0]][scale]
                 cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale] )
                 # cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( torch.max( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale], torch.zeros_like(innerp_dict[tags[2]][scale])+1e-7 ) )
@@ -1138,12 +1143,13 @@ class Trainer:
         losses["loss_inp/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
         for scale in self.opt.scales:
             for frame_id in self.opt.frame_ids:
-                if frame_id == 0:
-                    continue
-                combo_ = (0, frame_id, False, False)
+                # if frame_id == 0:
+                #     continue
+                combo_ = (0, frame_id, True, False)
                 losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[combo_][scale]
                 losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[combo_][scale]
-                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
+                # losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
+                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - self.feats_ell["xyz"]*self.feats_ell["xyz"]*torch.log( inp_dict[combo_][scale] ) # Jan 16: use log!
                 losses["loss_cvo/sum"] += losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_cos/sum"] += losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_inp/sum"] += losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]
