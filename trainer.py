@@ -39,7 +39,7 @@ from wrap_to_panoptic import to_panoptic, PanopVis
 
 import threading
 
-from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal
+from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal, calc_normal
 
 import torch
 torch.manual_seed(0)
@@ -50,6 +50,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import math
+from pcl_vis import visualize_pcl
 
 def my_collate_fn(batch):
     batch_new = {}
@@ -260,6 +261,7 @@ class Trainer:
             self.step = 0
             self.start_time = time.time()
             for self.epoch in range(self.opt.num_epochs):
+                torch.manual_seed(self.epoch) ## Jan 17, solve the problem of different shuffling of mini-batches between using and not using cvo trials after epoch 1. 
                 self.run_epoch()
                 if (self.epoch + 1) % self.opt.save_frequency == 0:
                     self.save_model()
@@ -767,7 +769,7 @@ class Trainer:
                 outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["normal"]  
                 outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["nres"] 
 
-            combos_needed = None
+            self.combos_needed = None
 
             if frame_id == 0:
                 id_pairs = [(0,1), (0,-1)]
@@ -776,7 +778,7 @@ class Trainer:
 
             for id_pair in id_pairs:
                 combo = (id_pair[0], id_pair[1], gt_flag)
-                need_calc = combos_needed is None or combo in combos_needed
+                need_calc = self.combos_needed is None or combo in self.combos_needed
                 if need_calc:
                     other_id = id_pair[0] if id_pair[0] != 0 else id_pair[1] # ZMH: the one that is not zero
                     wrap_id = 0 if frame_id != 0 else other_id # ZMH: the one that is not current frame_id
@@ -820,6 +822,98 @@ class Trainer:
                             outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)][ib] = torch.matmul(Ri, outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)][ib])
                             outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)][ib]
 
+    def get_grid_flat_normal(self, outputs):
+        """ after concat_flat, before calc inner product
+        """
+        ## loop over all frame_id and scale
+        for scale in self.opt.scales:
+            for frame_id in self.opt.frame_ids:
+                for gt_flag in [True, False]:
+                    ## 1. flat_normal and flat_nres from concat flat_xyz (same frame)
+                    self.normal_from_depth_v2(outputs, frame_id, scale, gt_flag)
+
+                    ## 2. grid_normal and grid_nres from flat_normal and flat_nres (same frame)
+                    outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)], \
+                        outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)] = \
+                        self.grid_from_concated_flat(flat_uvb=outputs[("flat_uvb", frame_id, scale, frame_id, gt_flag)], \
+                                                    flat_info=outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)], \
+                                                    flat_nres=outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)], \
+                                                    grid_xyz_shape=outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)].shape)
+
+                    outputs[("grid_normal_vis", frame_id, scale, frame_id, gt_flag)] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] * 0.5 + 0.5
+
+                    ## 3. flat_normal and flat_nres of cross frames
+                    n_pts = {}
+                    n_pts[0] = 0
+                    for ib in range(self.opt.batch_size):
+                        n_pts[ib+1] = outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib].shape[2] # flat_uv is not flattened
+
+                    if frame_id == 0:
+                        id_pairs = [(0,1), (0,-1)]
+                    else:
+                        id_pairs = [(frame_id, 0)]
+
+                    for id_pair in id_pairs:
+                        combo = (id_pair[0], id_pair[1], gt_flag)
+                        need_calc = self.combos_needed is None or combo in self.combos_needed
+                        if need_calc:
+                            other_id = id_pair[0] if id_pair[0] != 0 else id_pair[1] # ZMH: the one that is not zero
+                            wrap_id = 0 if frame_id != 0 else other_id # ZMH: the one that is not current frame_id
+
+                            Ts = outputs[("cam_T_cam", 0, other_id)] # T_x0
+                            flat_normal_wrap_bs = []
+                            for ib in range(self.opt.batch_size):
+                                flat_normal_b = outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
+                                Ti = Ts[ib:ib+1]
+                                if frame_id == 0:
+                                    Ri = Ti[:, :3, :3]
+                                else:
+                                    Ti_inv = torch.inverse(Ti)
+                                    Ri = Ti_inv[:, :3, :3]
+
+                                flat_normal_wrap_bs.append( torch.matmul(Ri, flat_normal_b ) )
+
+                            outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)] = torch.cat(flat_normal_wrap_bs, dim=2)
+                            outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)] = outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)]
+
+
+    def normal_from_depth_v2(self, outputs, frame_id, scale, gt_flag):
+        
+        pts = outputs[("flat_uvb", frame_id, scale, frame_id, gt_flag)]
+        grid_source = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
+        grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
+        neighbor_range = int(3)
+        ignore_ib = False
+        min_dist_2 = 0.05
+        normal, res = calc_normal(pts, grid_source, grid_valid, neighbor_range, ignore_ib, min_dist_2)
+        outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)] = normal
+        outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)] = res
+
+        self.set_normal_params()
+        
+    def grid_from_concated_flat(self, flat_uvb, flat_info, flat_nres, grid_xyz_shape):
+        '''flat_info and flat_uvb: 1*C*N(sum of the mini-batch) or 1*3*N
+        flat_nres: 1*1*N
+        '''
+        ## TODO: How to deal with points with no normal?
+        uvb_split = flat_uvb.to(dtype=torch.long).squeeze(0).transpose(0,1).split(1,dim=1) # a tuple of 3 elements of tensor N*1, only long/byte/bool tensors can be used as indices
+
+        C_info = flat_info.shape[1]
+        grid_info = torch.zeros((grid_xyz_shape[0], C_info, grid_xyz_shape[2], grid_xyz_shape[3]), dtype=flat_info.dtype, device=flat_info.device) # B*C*H*W
+        flat_info_t = flat_info.squeeze(0).transpose(0,1).unsqueeze(1) # N*1*C
+        grid_info[uvb_split[2], :, uvb_split[1], uvb_split[0]] = flat_info_t
+
+        C_res = flat_nres.shape[1]
+        grid_nres = torch.zeros((grid_xyz_shape[0], C_res, grid_xyz_shape[2], grid_xyz_shape[3]), dtype=flat_info.dtype, device=flat_info.device) # B*1*H*W
+        flat_nres_t = flat_nres.squeeze(0).transpose(0,1).unsqueeze(1) # N*1*1
+        grid_nres[uvb_split[2], :, uvb_split[1], uvb_split[0]] = flat_nres_t
+
+        return grid_info, grid_nres
+        
+    def set_normal_params(self):
+        self.res_mag_max = 2
+        self.res_mag_min = 0.1
+        self.norm_in_dist = True
 
     def normal_from_depth(self, frame_id, scale, outputs, gt_flag):
         #### generate depth normal and confidence
@@ -833,9 +927,7 @@ class Trainer:
         self.equi_dist = 0.05
         # self.ref_nres = 0.1
         # self.ref_nres_sqrt = math.sqrt(self.ref_nres)
-        self.res_mag_max = 2
-        self.res_mag_min = 0.1
-        self.norm_in_dist = False
+        self.set_normal_params()
 
         num_in_kern = self.kern_normal[0]*self.kern_normal[1]
         xyz_grid = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
@@ -858,8 +950,9 @@ class Trainer:
         ### weight
         xyz_center = xyz_patches[:,:,[(num_in_kern-1)/2]] # B*(H*W)*1*3
         dist = torch.norm(xyz_patches - xyz_center, dim=3) # B*(H*W)*N
-        min_dist = torch.ones_like(dist) * self.equi_dist
-        dist = torch.where(dist > min_dist, dist, min_dist)
+        # min_dist = torch.ones_like(dist) * self.equi_dist
+        # dist = torch.where(dist > min_dist, dist, min_dist)
+        dist = torch.clamp(dist, min=self.equi_dist)
         # dist = dist / self.equi_dist
         W_flat = 1/dist.unsqueeze(-1)   # B*(H*W)*N*1
         # W_diag = torch.diag_embed(W_flat) # B*(H*W)*N*N # this will cost a lot of memory
@@ -1063,7 +1156,7 @@ class Trainer:
                     grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
                     if feat == "seman":
                         inp_feat_dict[combo][scale] = PtSampleInGridAngle.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range)
-                    elif feat == "xyz" and self.opt.use_normal:
+                    elif feat == "xyz" and (self.opt.use_normal or self.opt.use_normal_v2):
                         flat_normal = outputs[("flat_normal", flat_idx, scale, grid_idx, flat_gt)].contiguous()
                         grid_normal = outputs[("grid_normal", grid_idx, scale, grid_idx, grid_gt)].contiguous()
                         flat_nres = outputs[("flat_nres", flat_idx, scale, grid_idx, flat_gt)].contiguous()
@@ -1505,6 +1598,11 @@ class Trainer:
                     # for ib in range(self.opt.batch_size):
                     #     draw3DPts(outputs[("xyz_gt", 0, 0)][ib].detach()[:,:3,:], pcl_2=outputs[("xyz_gt", frame_id, scale)][ib].detach()[:,:3,:], 
                     #         color_1=outputs[("rgb_gt", 0, 0)][ib].detach(), color_2=outputs[("rgb_gt", frame_id, scale)][ib].detach())
+
+                    if not self.opt.cvo_loss_dense:
+                        for ib in range(self.opt.batch_size):
+                            print(outputs[("rgb_gt", 0, 0)][ib]*255)
+                            visualize_pcl(outputs[("xyz_gt", 0, 0)][ib].detach()[:,:3,:], rgb=outputs[("rgb_gt", 0, 0)][ib].detach() )
                     
 
                 if not self.opt.disable_automasking:
@@ -1724,6 +1822,8 @@ class Trainer:
                 innerps = self.gen_innerp_dense(inputs, outputs)
             else:
                 self.concat_flat(outputs)
+                if self.opt.use_normal_v2:
+                    self.get_grid_flat_normal(outputs)
                 innerps, dists, coss = self.get_innerp_from_grid_flat(outputs)
                 self.reg_cvo_to_loss(losses, innerps, dists, coss)
 
@@ -2173,7 +2273,7 @@ class Trainer:
                         "disp_{}/maskgtsp_{}".format(s, j),
                         inputs[("depth_mask_gt_sp", 0, s)][j], self.step)
 
-                if self.opt.use_normal:
+                if self.opt.use_normal or self.opt.use_normal_v2:
                     writer.add_image(
                         "normal_{}/dir_{}".format(s, j),
                         outputs[("grid_normal_vis", 0, s, 0, False)][j], self.step)

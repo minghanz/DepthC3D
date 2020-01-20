@@ -178,6 +178,9 @@ class MonodepthOptions:
         self.parser.add_argument("--use_normal",
                                  help="if set, calc normal vectors from depth and used in cvo calculation",
                                  action="store_true")
+        self.parser.add_argument("--use_normal_v2",
+                                 help="if set, calc normal vectors from depth and used in cvo calculation, using the custom operation PtSampleInGridCalcNormal",
+                                 action="store_true")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",
