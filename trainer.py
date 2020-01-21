@@ -312,7 +312,8 @@ class Trainer:
                 loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
             if self.opt.supervised_by_gt_depth:
                 # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
-                loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
+                loss += losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
             if self.opt.sup_cvo_pose_lidar:
                 loss += 0.1 * losses["loss_pose/cos_sum"] / self.num_scales / self.opt.iters_per_update
             loss.backward()
@@ -1118,11 +1119,11 @@ class Trainer:
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
 
         # feats_needed = ["xyz", "hsv"]
-        feats_ell = {}
-        feats_ell["xyz"] = 0.05
-        feats_ell["hsv"] = 0.2
-        feats_ell["panop"] = 0.2    # in Angle mode this is not needed
-        feats_ell["seman"] = 0.2    # in Angle mode this is not needed
+        self.feats_ell = {}
+        self.feats_ell["xyz"] = 0.05
+        self.feats_ell["hsv"] = 0.2
+        self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
+        self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
         neighbor_range = int(1)
         inp_feat_dict = {}
@@ -1131,7 +1132,7 @@ class Trainer:
             flat_idx, grid_idx, flat_gt, grid_gt, feat = combo      # using the frame of grid_idx
             for scale in self.opt.scales:
                 # pts, pts_info, grid_source, grid_valid, neighbor_range, ell
-                ell = float(feats_ell[feat])
+                ell = float(self.feats_ell[feat])
                 if feat == "panop":
                     inn_list = []
                     for ib in range(self.opt.batch_size):
@@ -1221,7 +1222,8 @@ class Trainer:
             cos_dict[combo] = {}
             inp_dict[combo] = {}
             for scale in self.opt.scales:
-                inp_dict[combo][scale] = - innerp_dict[tags[0]][scale] # fixed Jan 6!
+                # inp_dict[combo][scale] = - innerp_dict[tags[0]][scale] # fixed Jan 6!
+                inp_dict[combo][scale] = innerp_dict[tags[0]][scale] # Jan 16: no neg here with log!
                 dist_dict[combo][scale] = innerp_dict[tags[1]][scale] + innerp_dict[tags[2]][scale] - 2 * innerp_dict[tags[0]][scale]
                 cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale] )
                 # cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( torch.max( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale], torch.zeros_like(innerp_dict[tags[2]][scale])+1e-7 ) )
@@ -1239,7 +1241,8 @@ class Trainer:
                 combo_ = (0, frame_id, True, False)
                 losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[combo_][scale]
                 losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[combo_][scale]
-                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
+                # losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
+                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - self.feats_ell["xyz"]*self.feats_ell["xyz"]*torch.log( inp_dict[combo_][scale] ) # Jan 16: use log!
                 losses["loss_cvo/sum"] += losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_cos/sum"] += losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_inp/sum"] += losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]
