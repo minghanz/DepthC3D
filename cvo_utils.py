@@ -62,8 +62,8 @@ class PtSampleInGridWithNormal(Function):
         pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres = ctx.saved_tensors
         dy = dy.contiguous()
         dx1, dx2, dn1, dn2, dr1, dr2 = cvo_dense_with_normal.backward(dy, pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, ctx.neighbor_range, ctx.ell, ctx.mag_max, ctx.mag_min, ctx.ignore_ib, ctx.norm_in_dist)
-        # return None, dx1, dx2, None, dn1, dn2, dr1, dr2, None, None, None, None, None, None
-        return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None
+        return None, dx1, dx2, None, dn1, dn2, dr1, dr2, None, None, None, None, None, None
+        # return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None
         
 class PtSampleInGridCalcNormal(Function):
     @staticmethod
@@ -75,13 +75,13 @@ class PtSampleInGridCalcNormal(Function):
     
     @staticmethod
     def backward(ctx, dnormals, dnorms):
-        # ioffs, pts, grid_source = ctx.saved_tensors
-        # dgrid = cvo_dense_normal.backward(dnormals, dnorms, ioffs, pts, grid_source, ctx.ignore_ib)
-        # return None, dgrid, None, None, None
-        return None, None, None, None, None
+        ioffs, pts, grid_source = ctx.saved_tensors
+        dgrid = cvo_dense_normal.backward(dnormals, dnorms, ioffs, pts, grid_source, ctx.ignore_ib)
+        return None, dgrid, None, None, None
+        # return None, None, None, None, None
 
 def calc_normal(pts, grid_source, grid_valid, neighbor_range, ignore_ib, min_dist_2=0.05):
-    raw_normals, norm_sq = PtSampleInGridCalcNormal.apply(pts, grid_source, grid_valid, neighbor_range, ignore_ib) ## raw_normals is 4*C*N, and norm_sq is 4*2*N
+    raw_normals, norm_sq = PtSampleInGridCalcNormal.apply(pts.contiguous(), grid_source.contiguous(), grid_valid.contiguous(), neighbor_range, ignore_ib) ## raw_normals is 4*C*N, and norm_sq is 4*2*N
 
     # raw_normals = torch.ones((4,3,pts.shape[-1]), device=grid_source.device, dtype=grid_source.dtype)
     # norm_sq = torch.ones((4,2,pts.shape[-1]), device=grid_source.device, dtype=grid_source.dtype)

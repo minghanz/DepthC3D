@@ -76,7 +76,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -845,7 +845,7 @@ class Trainer:
                     n_pts = {}
                     n_pts[0] = 0
                     for ib in range(self.opt.batch_size):
-                        n_pts[ib+1] = outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib].shape[2] # flat_uv is not flattened
+                        n_pts[ib+1] = n_pts[ib] + outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib].shape[2] # flat_uv is not flattened
 
                     if frame_id == 0:
                         id_pairs = [(0,1), (0,-1)]
