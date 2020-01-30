@@ -35,7 +35,7 @@ class MonodepthOptions:
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val"],
                                  default="eigen_zhou")
         self.parser.add_argument("--num_layers",
                                  type=int,
@@ -47,6 +47,11 @@ class MonodepthOptions:
                                  help="dataset to train on",
                                  default="kitti",
                                  choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM"])
+        self.parser.add_argument("--dataset_val",
+                                 type=str,
+                                 help="dataset to evaluate on",
+                                 default="kitti",
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM"]) # ZMH: this option added by me
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")

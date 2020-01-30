@@ -14,6 +14,8 @@ import PIL.Image as pil
 from kitti_utils import generate_depth_map, flip_lidar, project_lidar_to_img
 from .mono_dataset import MonoDataset
 
+from skimage.morphology import binary_dilation, binary_closing
+import torch
 
 class KITTIDataset(MonoDataset):
     """Superclass for different types of KITTI dataset loaders
@@ -146,6 +148,63 @@ class KITTIRAWDataset(KITTIDataset):
 
         return depth_gt, velo_rect, P_rect_norm
 
+    def get_depth_related(self, folder, frame_index, side, do_flip, inputs):
+
+        depth_gt, _, K_ = self.get_depth(folder, frame_index, side, do_flip)
+        
+        inputs["depth_gt"] = np.expand_dims(depth_gt, 0)
+        inputs["depth_gt"] = torch.from_numpy(inputs["depth_gt"].astype(np.float32))
+
+        ## ZMH: load intrinsic matrix K here
+        for scale in range(self.num_scales):
+            K = K_.copy()
+            K[0, :] *= self.width // (2 ** scale)
+            K[1, :] *= self.height // (2 ** scale)
+
+            inv_K = np.linalg.pinv(K)
+
+            inputs[("K", scale)] = torch.from_numpy(K).to(dtype=torch.float32)
+            inputs[("inv_K", scale)] = torch.from_numpy(inv_K).to(dtype=torch.float32)
+
+        ## ZMH: load image with network-compatible size
+        for i in self.frame_idxs:
+            if i == "s":
+                other_side = {"r": "l", "l": "r"}[side]
+                inputs[("depth_gt_scale", i, -1)], _, _ = self.get_depth(folder, frame_index, other_side, do_flip)
+            else:
+                inputs[("depth_gt_scale", i, -1)], velo_rect, P_rect_norm = self.get_depth(folder, frame_index + i, side, do_flip)
+                if do_flip:
+                    inputs[("velo_gt", i)] = flip_lidar(velo_rect, P_rect_norm)
+                    inputs[("velo_gt", i)] = torch.from_numpy(inputs[("velo_gt", i)].astype(np.float32))
+                else:
+                    inputs[("velo_gt", i)] = torch.from_numpy(velo_rect.astype(np.float32))
+            
+            for j in range(self.num_scales):
+                new_w = self.width // (2 ** j)
+                new_h = self.height // (2 ** j)
+
+                depth_gt = project_lidar_to_img(velo_rect, P_rect_norm, np.array([new_h, new_w]))
+                if do_flip:
+                    depth_gt = np.fliplr(depth_gt)
+
+                ### generate mask from the lidar points
+                # mask = binary_dilation(depth_gt, self.dilate_struct[j])
+                mask = depth_gt.copy()
+                mask[int(new_h/2):] = 1
+                mask = binary_closing(mask, self.dilate_struct[j])
+                mask = np.expand_dims(mask, 0)
+                inputs[("depth_mask", i, j)] = torch.from_numpy(mask)
+
+                # depth_gt = skimage.transform.resize(inputs[("depth_gt_scale", i, -1)], (new_h, new_w), order=0, anti_aliasing=False ) # mine, ok
+                # depth_gt = skimage.transform.resize(inputs[("depth_gt_scale", i, -1)], (new_h, new_w), order=0, preserve_range=True, mode='constant') # from kitti_dataset.py (KITTIRAWDataset), not ok
+                # depth_gt = skimage.transform.resize(inputs[("depth_gt_scale", i, -1)], (new_h, new_w), order=0, preserve_range=True, mode='constant', anti_aliasing=False) # combined, ok
+                depth_gt = np.expand_dims(depth_gt, 0)
+                inputs[("depth_gt_scale", i, j)] = torch.from_numpy(depth_gt.astype(np.float32))
+                inputs[("depth_mask_gt", i, j)] = inputs[("depth_gt_scale", i, j)] > 0
+            
+            depth_gt = np.expand_dims(inputs[("depth_gt_scale", i, -1)], 0)
+            inputs[("depth_gt_scale", i, -1)] = torch.from_numpy(depth_gt.astype(np.float32))
+
 
 class KITTIOdomDataset(KITTIDataset):
     """KITTI dataset for odometry training and testing
@@ -186,11 +245,64 @@ class KITTIDepthDataset(KITTIDataset):
             "proj_depth/groundtruth/image_0{}".format(self.side_map[side]),
             f_str)
 
-        depth_gt = pil.open(depth_path)
+        calib_path = os.path.join(self.data_path, folder.split("/")[0])
+
+        # depth_gt = pil.open(depth_path) # ZMH: moved into generate_depth_map
+        depth_gt, P_rect_norm, im_shape  = generate_depth_map(calib_path, depth_path, self.side_map[side], vel_depth=True)
         depth_gt = depth_gt.resize(self.full_res_shape, pil.NEAREST)
         depth_gt = np.array(depth_gt).astype(np.float32) / 256
 
         if do_flip:
             depth_gt = np.fliplr(depth_gt)
 
-        return depth_gt
+        return depth_gt, P_rect_norm
+
+    def get_depth_related(self, folder, frame_index, side, do_flip, inputs):
+        """
+        inputs["depth_gt"]
+        inputs[("depth_gt_scale", i, -1)]
+        inputs[("depth_mask", i, j)]
+        inputs[("depth_mask_gt", i, j)]
+        """
+        depth_gt, K_ = self.get_depth(folder, frame_index, side, do_flip)
+        
+        inputs["depth_gt"] = np.expand_dims(depth_gt, 0)
+        inputs["depth_gt"] = torch.from_numpy(inputs["depth_gt"].astype(np.float32)) # input original scale
+
+        ## ZMH: load intrinsic matrix K here
+        for scale in range(self.num_scales):
+            K = K_.copy()
+            K[0, :] *= self.width // (2 ** scale)
+            K[1, :] *= self.height // (2 ** scale)
+
+            inv_K = np.linalg.pinv(K)
+
+            inputs[("K", scale)] = torch.from_numpy(K).to(dtype=torch.float32)
+            inputs[("inv_K", scale)] = torch.from_numpy(inv_K).to(dtype=torch.float32)
+
+        for i in self.frame_idxs:
+            if i == "s":
+                other_side = {"r": "l", "l": "r"}[side]
+                inputs[("depth_gt_scale", i, -1)], _ = self.get_depth(folder, frame_index, other_side, do_flip)
+            else:
+                inputs[("depth_gt_scale", i, -1)], _ = self.get_depth(folder, frame_index + i, side, do_flip)
+                
+
+            for j in range(self.num_scales):
+                new_w = self.width // (2 ** j)
+                new_h = self.height // (2 ** j)
+                
+                depth_gt = skimage.transform.resize(inputs[("depth_gt_scale", i, -1)], (new_h, new_w), order=0, preserve_range=True, mode='constant', anti_aliasing=False)
+
+                mask = depth_gt.copy()
+                mask[int(new_h/2):] = 1
+                mask = binary_closing(mask, self.dilate_struct[j])
+                mask = np.expand_dims(mask, 0)
+                inputs[("depth_mask", i, j)] = torch.from_numpy(mask)
+                
+                depth_gt = np.expand_dims(depth_gt, 0)
+                inputs[("depth_gt_scale", i, j)] = torch.from_numpy(depth_gt.astype(np.float32))
+                inputs[("depth_mask_gt", i, j)] = inputs[("depth_gt_scale", i, j)] > 0
+
+            depth_gt = np.expand_dims(inputs[("depth_gt_scale", i, -1)], 0)
+            inputs[("depth_gt_scale", i, -1)] = torch.from_numpy(depth_gt.astype(np.float32))

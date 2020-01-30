@@ -14,7 +14,7 @@ import torch
 
 # vis.spin()
 
-def visualize_pcl(xyz, rgb=None, intensity=None):
+def visualize_pcl(xyz, rgb=None, intensity=None, normal=None, filename=None, single_batch=False, tag=''):
     """Inputs are tensors of shape B*C*N
     """
     ## 1. tensor to np array
@@ -23,27 +23,43 @@ def visualize_pcl(xyz, rgb=None, intensity=None):
     if rgb is not None:
         rgb_np = rgb.cpu().numpy().swapaxes(1,2) * 255
         xyz_rgb = np.concatenate((xyz_np, rgb_np), axis=2)
-        print("xyz shape", xyz_np.shape)
-        print("rgb shape", rgb_np.shape)
-        print("xyz_rgb shape", xyz_rgb.shape)
     elif intensity is not None:
         intensity_np = intensity.cpu().numpy().swapaxes(1,2)
         xyz_inten = np.concatenate((xyz_np, intensity_np), axis=2)
+
+    if normal is not None:
+        normal_np = normal.cpu().numpy().swapaxes(1,2)
 
     ## 2. np array to pcl cloud objects
     ## 3. create visualize window 
     for ib in range(B):
         if rgb is not None:
             cloud = pcl.create_xyzrgb(xyz_rgb[ib])
-            print(cloud.ptype)
         elif intensity is not None:
-            cloud = pcl.PointCloud(xyz_inten[ib])
+            cloud = pcl.create_xyzi(xyz_inten[ib])
         else:
             cloud = pcl.create_xyz(xyz_np[ib])
+
+        if normal is not None:
+            cloud_nm = pcl.create_normal(normal_np[ib])
+            cloud = cloud.append_fields(cloud_nm)
         
-        print(cloud.to_ndarray())
-        vis = pcl.Visualizer()
-        vis.addPointCloud(cloud)
-        vis.addCoordinateSystem()
-        vis.spin()
-        pcl.io.save_pcd('{}.pcd'.format(ib), cloud)
+        # print(cloud.to_ndarray())
+
+        if filename is None:
+            vis = pcl.Visualizer()
+            if normal is not None:
+                vis.addPointCloudNormals(cloud, cloud_nm)
+            else:
+                vis.addPointCloud(cloud)
+            vis.addCoordinateSystem()
+            vis.spin()
+        else:
+            if single_batch:
+                pcl.io.save_pcd('{}{}.pcd'.format(filename, tag), cloud)
+                # if normal is not None:
+                #     pcl.io.save_pcd('{}{}_normal.pcd'.format(filename, tag), cloud_nm)
+            else:
+                pcl.io.save_pcd('{}{}_{}.pcd'.format(filename, tag, ib), cloud)
+                # if normal is not None:
+                #     pcl.io.save_pcd('{}{}_{}_normal.pcd'.format(filename, tag, ib), cloud_nm)

@@ -1,0 +1,2 @@
+This val_files is modified from test_files.txt in eigen_benchmark by removing the 09_28 frames, which is not included in kitti depth val dataset. 
+Then the first and last files in every sequence is deleted, because the network wants to load three adjacent frames. 

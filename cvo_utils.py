@@ -80,8 +80,16 @@ class PtSampleInGridCalcNormal(Function):
         return None, dgrid, None, None, None
         # return None, None, None, None, None
 
+def recall_grad(pre_info, grad):
+    # print(pre_info, grad)
+    # print(pre_info, torch.isnan(grad).any())
+    assert not torch.isnan(grad).any(), pre_info
+
 def calc_normal(pts, grid_source, grid_valid, neighbor_range, ignore_ib, min_dist_2=0.05):
     raw_normals, norm_sq = PtSampleInGridCalcNormal.apply(pts.contiguous(), grid_source.contiguous(), grid_valid.contiguous(), neighbor_range, ignore_ib) ## raw_normals is 4*C*N, and norm_sq is 4*2*N
+
+    if raw_normals.requires_grad:
+        raw_normals.register_hook(lambda grad: recall_grad("raw_normals", grad) )
 
     # raw_normals = torch.ones((4,3,pts.shape[-1]), device=grid_source.device, dtype=grid_source.dtype)
     # norm_sq = torch.ones((4,2,pts.shape[-1]), device=grid_source.device, dtype=grid_source.dtype)
@@ -100,9 +108,35 @@ def calc_normal(pts, grid_source, grid_valid, neighbor_range, ignore_ib, min_dis
     
     ## calculate residual
     res_sin_sq = 1- (normed_normal * weighted_normal).sum(dim=1, keepdim=True).pow(2) # 4*1*N
+
+    ## the F.normalize will generally result in norm slightly larger than 1
+    res_sin_sq = res_sin_sq.clamp(min=0)
+
+    # with torch.no_grad():
+    #     diff_normal = (normed_normal - weighted_normal).norm(dim=1) # 4*N
+    #     weit_normal = weighted_normal.norm(dim=1) # 1*N
+    #     print("identical #:", float(((diff_normal==0) & (weit_normal!=0)).sum() ) )
+
+    #     single = ((raw_normals.norm(dim=1) > 0).sum(dim=0))==1 # N
+    #     select_normal = diff_normal[:,single] # 4*N_sub
+    #     selsel_normal = select_normal.min(dim=0)[0] # N_sub
+    #     print(float(selsel_normal.min()), float(selsel_normal.max()))
+        
+    #     print("single #:", float(single.sum()))
+    #     print("..............................")
+
+    #     normed_norm = normed_normal.norm(dim=1)
+    #     normed_normw = weighted_normal.norm(dim=1)
+
+    #     print("normed_norm", float(normed_norm.min()), float(normed_norm.max()))
+    #     print("normed_normw", float(normed_normw.min()), float(normed_normw.max()))
+    #     print("res_sin_sq", float(res_sin_sq.min()), float(res_sin_sq.max()))
+
     res_weighted_sum = (res_sin_sq * W_norms_effective).sum(dim=0, keepdim=True) / (W_norms_sum + 1e-8) # 1*1*N
 
-    single_cross = (W_norms_sum != 0) & (res_weighted_sum == 0) # 1*1*N
+    single = ((raw_normals.norm(dim=1) > 0).sum(dim=0))==1 # N # the points whose normal is calculated from cross product of only 1 pair of points
+    single_cross = single.view(1,1,-1)
+    # single_cross = (W_norms_sum != 0) & (res_weighted_sum == 0) # 1*1*N
     single_cross_default_sin_sq = torch.ones_like(res_weighted_sum) * 0.5 # 1*1*N
     res_final = torch.where(single_cross, single_cross_default_sin_sq, res_weighted_sum) # 1*1*N
 

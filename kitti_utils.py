@@ -6,6 +6,8 @@ from collections import Counter
 
 import torch
 
+import PIL.Image as pil
+
 def load_velodyne_points(filename):
     """Load 3D point cloud from KITTI file format
     (adapted from https://github.com/hunse/kitti)
@@ -158,13 +160,18 @@ def generate_depth_map(calib_dir, velo_filename, cam=2, vel_depth=False):
 
     # load velodyne points and remove all behind image plane (approximation)
     # each row of the velodyne data is forward, left, up, reflectance
-    velo = load_velodyne_points(velo_filename) ## ZMH: the x,y,z,1 in n*4
-    velo = velo[velo[:, 0] >= 0, :]
+    if vel_depth:
+        depth_gt = pil.open(velo_filename)
 
-    # project the points to the camera
-    ### ZMH: do it in two steps
-    velo_rect = np.dot(P_velo2rect, velo.T).T ## ZMH: the lidar points in the rectified cam frame
-    
-    # depth = project_lidar_to_img(velo_rect, P_rect_norm, im_shape)
+        return depth_gt, P_rect_norm, im_shape
+    else:
+        velo = load_velodyne_points(velo_filename) ## ZMH: the x,y,z,1 in n*4
+        velo = velo[velo[:, 0] >= 0, :]
 
-    return velo_rect, P_rect_norm, im_shape ### ZMHL also return the extrinsic (not the same in different date folders)
+        # project the points to the camera
+        ### ZMH: do it in two steps
+        velo_rect = np.dot(P_velo2rect, velo.T).T ## ZMH: the lidar points in the rectified cam frame
+        
+        # depth = project_lidar_to_img(velo_rect, P_rect_norm, im_shape)
+
+        return velo_rect, P_rect_norm, im_shape ### ZMHL also return the extrinsic (not the same in different date folders)

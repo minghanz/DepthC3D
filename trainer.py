@@ -39,7 +39,7 @@ from wrap_to_panoptic import to_panoptic, PanopVis
 
 import threading
 
-from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal, calc_normal
+from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal, calc_normal, recall_grad
 
 import torch
 torch.manual_seed(0)
@@ -76,7 +76,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -173,8 +173,10 @@ class Trainer:
         # data
         datasets_dict = {"kitti": datasets.KITTIRAWDataset,
                          "kitti_odom": datasets.KITTIOdomDataset, 
-                         "TUM": datasets.TUMRGBDDataset}
+                         "kitti_depth": datasets.KITTIDepthDataset, 
+                         "TUM": datasets.TUMRGBDDataset} # ZMH: kitti_depth originally not shown as an option here
         self.dataset = datasets_dict[self.opt.dataset]
+        self.dataset_val = datasets_dict[self.opt.dataset_val]
 
         fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
 
@@ -194,7 +196,8 @@ class Trainer:
         self.train_loader = DataLoader(
             train_dataset, self.opt.batch_size, True,
             num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
-        val_dataset = self.dataset(
+
+        val_dataset = self.dataset_val(
             self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
             self.opt.frame_ids, 4, is_train=False, img_ext=img_ext)
         # self.val_loader = DataLoader(
@@ -256,16 +259,17 @@ class Trainer:
     def train(self):
         """Run the entire training pipeline
         """
-        with torch.autograd.set_detect_anomaly(True):
-            self.epoch = 0
-            self.step = 0
-            self.start_time = time.time()
-            for self.epoch in range(self.opt.num_epochs):
-                torch.manual_seed(self.epoch) ## Jan 17, solve the problem of different shuffling of mini-batches between using and not using cvo trials after epoch 1. 
-                self.run_epoch()
-                if (self.epoch + 1) % self.opt.save_frequency == 0:
-                    self.save_model()
-                self.val_set()
+        # with torch.autograd.set_detect_anomaly(True):
+        # with torch.autograd.detect_anomaly():
+        self.epoch = 0
+        self.step = 0
+        self.start_time = time.time()
+        for self.epoch in range(self.opt.num_epochs):
+            torch.manual_seed(self.epoch) ## Jan 17, solve the problem of different shuffling of mini-batches between using and not using cvo trials after epoch 1. 
+            self.run_epoch()
+            if (self.epoch + 1) % self.opt.save_frequency == 0:
+                self.save_model()
+            self.val_set()
 
     def run_epoch(self):
         """Run a single epoch of training and validation
@@ -414,6 +418,8 @@ class Trainer:
 
         if self.use_pose_net:
             outputs.update(self.predict_poses(inputs, features))
+
+        # self.generate_depths_pred(inputs, outputs, outputs_others)
 
         # self.generate_images_pred(inputs, outputs)
         self.generate_images_pred(inputs, outputs, outputs_others)
@@ -691,6 +697,22 @@ class Trainer:
                 flat_info_dict[item][i] = info_i_sel.unsqueeze(0) # ZMH: 1*C*N
 
         return flat_info_dict
+    
+    def flat_from_grid_single_item(self, grid_valid, grid_info):
+        ### ZMH: grid_xyz, grid_uv -> grid_valid, flat_xyz, flat_uv
+        flat_info = {}
+
+        for i in range(self.opt.batch_size):
+            mask_i = grid_valid[i].view(-1)
+            if isinstance(grid_info, list):
+                info_i = grid_info[i][0]
+            else:
+                info_i = grid_info[i]
+            info_i = info_i.view(info_i.shape[0], -1)
+            info_i_sel = info_i[:, mask_i]
+            flat_info[i] = info_i_sel.unsqueeze(0) # ZMH: 1*C*N
+
+        return flat_info
 
     def get_grid_flat(self, frame_id, scale, inputs, outputs):
         #### Generate: [pts (B*2*N), pts_info (B*C*N), grid_source (B*C*H*W), grid_valid (B*1*H*W)] in self frame and host frame
@@ -737,7 +759,7 @@ class Trainer:
                     outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask_sp", frame_id, scale)]
                 else:
                     outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask", frame_id, scale)] 
-
+                
             outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)] = rgb_to_hsv(inputs[("color", frame_id, scale)], flat=False)
             if self.opt.use_panoptic:
                 outputs[("grid_panop", frame_id, scale, frame_id, gt_flag)] = outputs[("panoptic", frame_id, scale)]
@@ -876,20 +898,81 @@ class Trainer:
                             outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)] = torch.cat(flat_normal_wrap_bs, dim=2)
                             outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)] = outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)]
 
+    def save_pcd_grad(self, outputs, frame_id, scale, gt_flag, n_pts, xyz_grad_grid):
+        ## grad flat from grid
+        grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
+        xyz_grad_flat = self.flat_from_grid_single_item(grid_valid, xyz_grad_grid) # not concatenated
+        ## save pcd
+        # n_pts = {}
+        # n_pts[0] = 0
+        # for ib in range(self.opt.batch_size):
+        #     n_pts[ib+1] = n_pts[ib] + xyz_grad_flat[ib].shape[-1]
+        self.save_pcd_from_concat_flat(outputs, frame_id, scale, gt_flag, n_pts, xyz_grad_flat)
+
+    def save_pcd(self, outputs):
+        frame_id = 0
+        for scale in self.opt.scales:
+            for gt_flag in [True, False]:
+                n_pts = {}
+                n_pts[0] = 0
+                for ib in range(self.opt.batch_size):
+                    n_pts[ib+1] = n_pts[ib] + outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib].shape[2] # flat_uv is not flattened
+                
+                self.save_pcd_from_concat_flat(outputs, frame_id, scale, gt_flag, n_pts)
+
+                if outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)].requires_grad:
+                    outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)].register_hook(lambda grad,frame_id=frame_id,scale=scale,gt_flag=gt_flag,n_pts=n_pts: \
+                                                                                            self.save_pcd_grad( outputs, frame_id, scale, gt_flag, n_pts, grad) )
+
+
+    def save_pcd_from_concat_flat(self, outputs, frame_id, scale, gt_flag, n_pts, xyz_grad=None):
+        with torch.no_grad():
+            path_pcd = os.path.join(self.log_path, "pcds_"+self.ctime)
+            if not os.path.exists(path_pcd):
+                os.makedirs(path_pcd)
+            for ib in range(self.opt.batch_size):
+                xyz = outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
+                filename = os.path.join(path_pcd, "{}_{}_{}_{}_{}_{}".format(self.step, frame_id, scale, gt_flag, ib, self.train_flag) )
+
+                if xyz_grad is None:
+                    color = hsv_to_rgb( outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ], flat=True )
+                    if self.opt.use_normal or self.opt.use_normal_v2:
+                        normal = outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
+                        visualize_pcl(xyz, rgb=color, normal=normal, filename=filename, single_batch=True)
+                    else:
+                        visualize_pcl(xyz, rgb=color, filename=filename, single_batch=True)
+                else:
+                    xyz_grad_ib = xyz_grad[ib] # xyz_grad is flat but not concatenated. It is a list
+                    xyz_grad_ib_norm = xyz_grad_ib.norm(dim=1, keepdim=True) # B*1*N
+                    grad_norm_max = xyz_grad_ib_norm.max()
+                    xyz_grad_ib_norm = xyz_grad_ib_norm / grad_norm_max * 255
+                    xyz_grad_ib = F.normalize(xyz_grad_ib, dim=1)
+                    visualize_pcl(xyz, intensity=xyz_grad_ib_norm, normal=xyz_grad_ib, filename=filename, single_batch=True, tag='_grad')
+                    with open("{}_grad_norm_max.txt".format(filename), 'w') as f:
+                        f.write( str(float(grad_norm_max)) )
 
     def normal_from_depth_v2(self, outputs, frame_id, scale, gt_flag):
-        
         pts = outputs[("flat_uvb", frame_id, scale, frame_id, gt_flag)]
         grid_source = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
         grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
-        neighbor_range = int(3)
+        neighbor_range = int(5)
         ignore_ib = False
         min_dist_2 = 0.05
-        normal, res = calc_normal(pts, grid_source, grid_valid, neighbor_range, ignore_ib, min_dist_2)
+        with torch.no_grad():
+            normal, res = calc_normal(pts, grid_source, grid_valid, neighbor_range, ignore_ib, min_dist_2)
         outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)] = normal
         outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)] = res
+        # self.print_range(res, pre_msg="{} {} {}".format(frame_id, scale, gt_flag))
 
         self.set_normal_params()
+    
+    def print_range(self, tensor, pre_msg=None):
+        with torch.no_grad():
+            max_val = torch.max(tensor)
+            max_dummy = torch.ones_like(tensor)*max_val
+            tensor_nonzero = torch.where(tensor==0, max_dummy, tensor)
+            min_val = torch.min(tensor_nonzero)
+            print(pre_msg, float(min_val), float(max_val) )
         
     def grid_from_concated_flat(self, flat_uvb, flat_info, flat_nres, grid_xyz_shape):
         '''flat_info and flat_uvb: 1*C*N(sum of the mini-batch) or 1*3*N
@@ -1125,7 +1208,7 @@ class Trainer:
         self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
         self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
-        neighbor_range = int(1)
+        neighbor_range = int(2)
         inp_feat_dict = {}
         for combo in inp_feat_combos:
             inp_feat_dict[combo] = {}
@@ -1163,6 +1246,24 @@ class Trainer:
                         grid_nres = outputs[("grid_nres", grid_idx, scale, grid_idx, grid_gt)].contiguous()
                         inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
                             flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.res_mag_max, self.res_mag_min, False, self.norm_in_dist)
+                        
+                        try:
+                            assert not (inp_feat_dict[combo][scale]==0).all(), "{}{} is all zero".format(combo, scale)
+                        except:
+                            print("{}{} is all zero".format(combo, scale))
+                            print("flat_normal", float(flat_normal.min()), float(flat_normal.max()) )
+                            print("grid_normal", float(grid_normal.min()), float(grid_normal.max()) )
+                            print("flat_nres", float(flat_nres.min()), float(flat_nres.max()) )
+                            print("grid_nres", float(grid_nres.min()), float(grid_nres.max()) )
+
+                            print("flat_info", float(flat_info.min()), float(flat_info.max()) )
+                            print("grid_info", float(grid_info.min()), float(grid_info.max()) )
+                            print("grid_valid", float(grid_valid.min()), float(grid_valid.max()) )
+                            print("flat_uv", float(flat_uv.min()), float(flat_uv.max()) )
+
+
+                        if  inp_feat_dict[combo][scale].requires_grad:
+                             inp_feat_dict[combo][scale].register_hook(lambda grad: recall_grad(" inp_feat_dict", grad) )
                     else:
                         inp_feat_dict[combo][scale] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
 
@@ -1218,6 +1319,12 @@ class Trainer:
                     cat_feat = torch.cat([inp_feat_dict[(*combo_, feat)][scale] for feat in feats], dim=0)
                     innerp_dict[tag][scale] = torch.prod(cat_feat, dim=0).sum()
 
+                    if innerp_dict[tag][scale] == 0:
+                        print(tag, scale)
+                        for feat in feats:
+                            print( feat, "All zero?", (inp_feat_dict[(*combo_, feat)][scale]==0).all() )
+
+
             dist_dict[combo] = {}
             cos_dict[combo] = {}
             inp_dict[combo] = {}
@@ -1243,6 +1350,14 @@ class Trainer:
                 losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[combo_][scale]
                 # losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
                 losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - self.feats_ell["xyz"]*self.feats_ell["xyz"]*torch.log( inp_dict[combo_][scale] ) # Jan 16: use log!
+                try:
+                    assert not torch.isnan(losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]).any(), "{} {} nan detected".format(scale, frame_id)
+                    assert not torch.isinf(losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]).any(), "{} {} inf detected".format(scale, frame_id)
+                except AssertionError as error:
+                    print(scale, frame_id)
+                    print("inp:", inp_dict[combo_][scale])
+                    print("log inp:", torch.log( inp_dict[combo_][scale] )  )
+
                 losses["loss_cvo/sum"] += losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_cos/sum"] += losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)]
                 losses["loss_inp/sum"] += losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]
@@ -1455,6 +1570,28 @@ class Trainer:
         
         return inp, f_dist, cos_sim
 
+    def generate_depths_pred(self, inputs, outputs, outputs_others=None):
+        for scale in self.opt.scales:
+            ## depth from disparity
+            disp = outputs[("disp", scale)]
+            depth, source_scale = self.from_disp_to_depth(disp, scale)
+            outputs[("depth", 0, scale)] = depth
+
+            if self.opt.cvo_loss:
+                # self.gen_pcl_gt(inputs, outputs, disp, scale, 0)
+                depth_curscale, _ = self.from_disp_to_depth(disp, scale, force_multiscale=True)
+                outputs[("depth_scale", 0, scale)] = depth_curscale
+
+            for frame_id in self.opt.frame_ids[1:]:
+                ## depth from disparity
+                if self.opt.cvo_loss:# and frame_id == -1:
+                    assert outputs_others is not None, "no disparity prediction of other images!"
+                    disp = outputs_others[frame_id][("disp", scale)]
+                    
+                    # self.gen_pcl_gt(inputs, outputs, disp, scale, frame_id, T_inv) 
+                    depth_curscale, _ = self.from_disp_to_depth(disp, scale, force_multiscale=True)
+                    outputs[("depth_scale", frame_id, scale)] = depth_curscale         
+
     # def generate_images_pred(self, inputs, outputs):
     ## ZMH: add depth output of other images
     def generate_images_pred(self, inputs, outputs, outputs_others=None):
@@ -1464,8 +1601,19 @@ class Trainer:
         for scale in self.opt.scales:
             ### ZMH: generate depth of host image from current scale disparity estimation
             disp = outputs[("disp", scale)]
+            if disp.requires_grad:
+                disp.register_hook(lambda grad: recall_grad("disp", grad))
+
             depth, source_scale = self.from_disp_to_depth(disp, scale)
             outputs[("depth", 0, scale)] = depth
+            ##----------------------
+            # if self.opt.v1_multiscale or force_multiscale:
+            #     source_scale = scale
+            # else:
+            #     source_scale = 0
+            # depth = outputs[("depth", 0, scale)]
+
+
             cam_points = self.backproject_depth[source_scale](
                 depth, inputs[("inv_K", source_scale)])
 
@@ -1492,6 +1640,9 @@ class Trainer:
                     T = inputs["stereo_T"]
                 else:
                     T = outputs[("cam_T_cam", 0, frame_id)]
+
+                if T.requires_grad:
+                    T.register_hook(lambda grad: recall_grad("T", grad))
 
                 # from the authors of https://arxiv.org/abs/1712.00175
                 if self.opt.pose_model_type == "posecnn":
@@ -1824,6 +1975,8 @@ class Trainer:
                 self.concat_flat(outputs)
                 if self.opt.use_normal_v2:
                     self.get_grid_flat_normal(outputs)
+                if self.step % 4000 == 0:
+                    self.save_pcd(outputs)
                 innerps, dists, coss = self.get_innerp_from_grid_flat(outputs)
                 self.reg_cvo_to_loss(losses, innerps, dists, coss)
 
