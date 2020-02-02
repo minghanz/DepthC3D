@@ -76,7 +76,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -339,6 +339,37 @@ class Trainer:
                 self.val()
 
             self.step += 1
+
+            ### ZMH: prevent memory leakage: https://discuss.pytorch.org/t/gpu-memory-consumption-increases-while-training/2770 
+            # del loss, losses, outputs, inputs
+
+            ## ZMH: monitor GPU usage:
+            if early_phase or late_phase:
+                allo = torch.cuda.memory_allocated()/1024/1024
+                cach = torch.cuda.memory_cached()/1024/1024
+                max_allo = torch.cuda.max_memory_allocated()/1024/1024
+                max_cach = torch.cuda.max_memory_cached()/1024/1024
+
+                print("GPU memory allocated at the end of iter {}: cur: {:.1f}, {:.1f}, {:.1f}; max: {:.1f}, {:.1f}, {:.1f}".format(self.step-1, allo, cach, allo+cach, \
+                                                                                                                max_allo, max_cach, max_allo+max_cach ))
+                # if (self.step-1) % 100 == 0:
+                self.writers["train"].add_scalar("Mem/allo", allo, self.step-1)
+                self.writers["train"].add_scalar("Mem/cach", cach, self.step-1)
+                self.writers["train"].add_scalar("Mem/al+ca", allo+cach, self.step-1)
+                
+                self.writers["train"].add_scalar("Mem/max_allo", max_allo, self.step-1)
+                self.writers["train"].add_scalar("Mem/max_cach", max_cach, self.step-1)
+                self.writers["train"].add_scalar("Mem/max_al+ca", max_allo+max_cach, self.step-1)
+                    
+                # torch.cuda.reset_peak_stats()
+                torch.cuda.reset_max_memory_cached()
+                torch.cuda.reset_max_memory_allocated()
+            # for obj in gc.get_objects():
+            #     try:
+            #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+            #             print(type(obj), obj.size())
+            #     except:
+            #         pass
         
         self.model_lr_scheduler.step()
 
@@ -542,6 +573,9 @@ class Trainer:
                 print("{}: {:.2f}".format(l, losses_sum[l].item() ) ) # use .item to transform the 0-dim tensor to a python number      
             
             self.log("val_set", inputs, outputs, losses_sum)
+
+            ### ZMH: prevent GPU memory leakage: 
+            del inputs, outputs, losses, losses_sum
 
         self.set_train()
         print("--------------------")
@@ -898,16 +932,9 @@ class Trainer:
                             outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)] = torch.cat(flat_normal_wrap_bs, dim=2)
                             outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)] = outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)]
 
-    def save_pcd_grad(self, outputs, frame_id, scale, gt_flag, n_pts, xyz_grad_grid):
-        ## grad flat from grid
-        grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
+    def save_pcd_grad(self, frame_id, scale, gt_flag, n_pts, xyz_grad_grid, grid_valid, xyz):
         xyz_grad_flat = self.flat_from_grid_single_item(grid_valid, xyz_grad_grid) # not concatenated
-        ## save pcd
-        # n_pts = {}
-        # n_pts[0] = 0
-        # for ib in range(self.opt.batch_size):
-        #     n_pts[ib+1] = n_pts[ib] + xyz_grad_flat[ib].shape[-1]
-        self.save_pcd_from_concat_flat(outputs, frame_id, scale, gt_flag, n_pts, xyz_grad_flat)
+        self.save_pcd_from_concat_flat(frame_id, scale, gt_flag, n_pts, xyz_grad=xyz_grad_flat, xyz=xyz)
 
     def save_pcd(self, outputs):
         frame_id = 0
@@ -918,23 +945,32 @@ class Trainer:
                 for ib in range(self.opt.batch_size):
                     n_pts[ib+1] = n_pts[ib] + outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib].shape[2] # flat_uv is not flattened
                 
-                self.save_pcd_from_concat_flat(outputs, frame_id, scale, gt_flag, n_pts)
+                self.save_pcd_from_concat_flat(frame_id, scale, gt_flag, n_pts, outputs=outputs)
 
                 if outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)].requires_grad:
-                    outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)].register_hook(lambda grad,frame_id=frame_id,scale=scale,gt_flag=gt_flag,n_pts=n_pts: \
-                                                                                            self.save_pcd_grad( outputs, frame_id, scale, gt_flag, n_pts, grad) )
+                    grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
+                    xyz = outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)]
+
+                    outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)].register_hook(lambda grad,frame_id1=frame_id,scale1=scale,gt_flag1=gt_flag,n_pts1=n_pts,grir_valid1=grid_valid,xyz1=xyz: \
+                                                                                            self.save_pcd_grad( frame_id1, scale1, gt_flag1, n_pts1, grad, grir_valid1, xyz1 ) )
 
 
-    def save_pcd_from_concat_flat(self, outputs, frame_id, scale, gt_flag, n_pts, xyz_grad=None):
+    def save_pcd_from_concat_flat(self, frame_id, scale, gt_flag, n_pts, outputs=None, xyz_grad=None, xyz=None):
         with torch.no_grad():
             path_pcd = os.path.join(self.log_path, "pcds_"+self.ctime)
             if not os.path.exists(path_pcd):
                 os.makedirs(path_pcd)
+
+            if xyz_grad is None:
+                assert outputs is not None and xyz is None
+            else:
+                assert outputs is None and xyz is not None
+
             for ib in range(self.opt.batch_size):
-                xyz = outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
                 filename = os.path.join(path_pcd, "{}_{}_{}_{}_{}_{}".format(self.step, frame_id, scale, gt_flag, ib, self.train_flag) )
 
                 if xyz_grad is None:
+                    xyz = outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
                     color = hsv_to_rgb( outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ], flat=True )
                     if self.opt.use_normal or self.opt.use_normal_v2:
                         normal = outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
@@ -942,12 +978,13 @@ class Trainer:
                     else:
                         visualize_pcl(xyz, rgb=color, filename=filename, single_batch=True)
                 else:
+                    xyz_ib = xyz[:, :, n_pts[ib]:n_pts[ib+1] ]
                     xyz_grad_ib = xyz_grad[ib] # xyz_grad is flat but not concatenated. It is a list
                     xyz_grad_ib_norm = xyz_grad_ib.norm(dim=1, keepdim=True) # B*1*N
                     grad_norm_max = xyz_grad_ib_norm.max()
                     xyz_grad_ib_norm = xyz_grad_ib_norm / grad_norm_max * 255
                     xyz_grad_ib = F.normalize(xyz_grad_ib, dim=1)
-                    visualize_pcl(xyz, intensity=xyz_grad_ib_norm, normal=xyz_grad_ib, filename=filename, single_batch=True, tag='_grad')
+                    visualize_pcl(xyz_ib, intensity=xyz_grad_ib_norm, normal=xyz_grad_ib, filename=filename, single_batch=True, tag='_grad')
                     with open("{}_grad_norm_max.txt".format(filename), 'w') as f:
                         f.write( str(float(grad_norm_max)) )
 
@@ -1975,13 +2012,16 @@ class Trainer:
                 self.concat_flat(outputs)
                 if self.opt.use_normal_v2:
                     self.get_grid_flat_normal(outputs)
+                
+
                 if self.step % 4000 == 0:
                     self.save_pcd(outputs)
+
                 innerps, dists, coss = self.get_innerp_from_grid_flat(outputs)
                 self.reg_cvo_to_loss(losses, innerps, dists, coss)
 
 
-        if not self.train_flag or self.opt.sup_cvo_pose_lidar:
+        if self.opt.sup_cvo_pose_lidar: # not self.train_flag or (this is used for evaluating cvo pose loss in baseline mode)
             if self.opt.cvo_loss_dense:
                 if not self.opt.dense_flat_grid:
                     losses["loss_pose/cos_sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
