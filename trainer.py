@@ -76,7 +76,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -386,16 +386,14 @@ class Trainer:
                 max_allo = torch.cuda.max_memory_allocated()/1024/1024
                 max_cach = torch.cuda.max_memory_cached()/1024/1024
 
-                print("GPU memory allocated at the end of iter {}: cur: {:.1f}, {:.1f}, {:.1f}; max: {:.1f}, {:.1f}, {:.1f}".format(self.step-1, allo, cach, allo+cach, \
-                                                                                                                max_allo, max_cach, max_allo+max_cach ))
+                print("GPU memory allocated at the end of iter {}: cur: {:.1f}, {:.1f}; max: {:.1f}, {:.1f}".format(self.step-1, allo, cach, \
+                                                                                                                max_allo, max_cach ))
                 # if (self.step-1) % 100 == 0:
                 self.writers["train"].add_scalar("Mem/allo", allo, self.step-1)
                 self.writers["train"].add_scalar("Mem/cach", cach, self.step-1)
-                self.writers["train"].add_scalar("Mem/al+ca", allo+cach, self.step-1)
                 
                 self.writers["train"].add_scalar("Mem/max_allo", max_allo, self.step-1)
                 self.writers["train"].add_scalar("Mem/max_cach", max_cach, self.step-1)
-                self.writers["train"].add_scalar("Mem/max_al+ca", max_allo+max_cach, self.step-1)
                     
                 # torch.cuda.reset_peak_stats()
                 torch.cuda.reset_max_memory_cached()
@@ -1321,7 +1319,7 @@ class Trainer:
                         flat_nres = outputs[("flat_nres", flat_idx, scale, grid_idx, flat_gt)].contiguous()
                         grid_nres = outputs[("grid_nres", grid_idx, scale, grid_idx, grid_gt)].contiguous()
                         inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
-                            flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.res_mag_max, self.res_mag_min, False, self.norm_in_dist)
+                            flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.res_mag_max, self.res_mag_min, False, self.norm_in_dist, self.opt.ell_basedist)
                         
                         try:
                             assert not (inp_feat_dict[combo][scale]==0).all(), "{}{} is all zero".format(combo, scale)
@@ -1341,7 +1339,7 @@ class Trainer:
                         if  inp_feat_dict[combo][scale].requires_grad:
                              inp_feat_dict[combo][scale].register_hook(lambda grad: recall_grad(" inp_feat_dict", grad) )
                     else:
-                        inp_feat_dict[combo][scale] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell)
+                        inp_feat_dict[combo][scale] = PtSampleInGrid.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range, ell, False, False, self.opt.ell_basedist)
 
                         ### print stats of distances
                         # if feat == "xyz" and flat_gt == False and grid_gt == False :

@@ -189,6 +189,10 @@ class MonodepthOptions:
         self.parser.add_argument("--random_ell",
                                  help="if set, the length scale of geometric kernel is selected randomly following a certain distribution",
                                  action="store_true")
+        self.parser.add_argument("--ell_basedist",
+                                 type=float, 
+                                 help="if not zero, the length scale is proportional to the depth of gt points when the depth is larger than this value. If zero, ell is constant",
+                                 default=0)
         ######## for val_set
         self.parser.add_argument("--val_set_only", 
                                  help="if set, only run val_set on pretrained weights", 
