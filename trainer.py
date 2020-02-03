@@ -29,7 +29,7 @@ from IPython import embed
 import sys
 script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, '../pytorch-unet'))
-from geometry_plot import draw3DPts
+# from geometry_plot import draw3DPts
 from geometry import gramian, kern_mat, rgb_to_hsv, hsv_to_rgb
 
 
@@ -264,12 +264,48 @@ class Trainer:
         self.epoch = 0
         self.step = 0
         self.start_time = time.time()
-        for self.epoch in range(self.opt.num_epochs):
-            torch.manual_seed(self.epoch) ## Jan 17, solve the problem of different shuffling of mini-batches between using and not using cvo trials after epoch 1. 
-            self.run_epoch()
-            if (self.epoch + 1) % self.opt.save_frequency == 0:
-                self.save_model()
+
+        if self.opt.val_set_only:
+            assert self.opt.load_weights_folder_parent is not None, "load_weights_folder_parent not given."
+            self.run_val_set_only()
+        else:
+            for self.epoch in range(self.opt.num_epochs):
+                torch.manual_seed(self.epoch) ## Jan 17, solve the problem of different shuffling of mini-batches between using and not using cvo trials after epoch 1. 
+                np.random.seed(self.epoch)
+                self.run_epoch()
+                if (self.epoch + 1) % self.opt.save_frequency == 0:
+                    self.save_model()
+                self.val_set()
+    
+    def run_val_set_only(self):
+        """
+        Use pretrained weights to run val set and log error to tensorboard
+        """
+        model_folder_list = os.listdir(self.opt.load_weights_folder_parent)
+        # file_name_digit = [int(file_names[i].split('.')[0]) for i in range(len(file_names))]
+        # file_name_idx = sorted(range(len(file_name_digit)),key=file_name_digit.__getitem__)
+        # file_names = [file_names[i] for i in file_name_idx]
+
+        model_folders = []
+        model_seq = []
+        for item in model_folder_list:
+            path = os.path.join(self.opt.load_weights_folder_parent, item)
+            if os.path.isdir(path):
+                model_folders.append(path)
+                weight_num=float(item.split('_')[-1])
+                model_seq.append(weight_num)
+        
+        model_folders_idx = sorted(range(len(model_seq)), key=model_seq.__getitem__)
+        model_folders = [model_folders[i] for i in model_folders_idx]
+
+        
+        for model_folder in model_folders:
+            self.opt.load_weights_folder = model_folder
+            self.load_model()
+
             self.val_set()
+            self.step += 1
+
 
     def run_epoch(self):
         """Run a single epoch of training and validation
@@ -1203,7 +1239,10 @@ class Trainer:
 
         # feats_needed = ["xyz", "hsv"]
         self.feats_ell = {}
-        self.feats_ell["xyz"] = 0.05
+        if self.opt.random_ell:
+            self.feats_ell["xyz"] = np.abs(0.05* np.random.normal()) + 0.02
+        else:
+            self.feats_ell["xyz"] = 0.05
         self.feats_ell["hsv"] = 0.2
         self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
         self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed

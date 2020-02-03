@@ -186,6 +186,16 @@ class MonodepthOptions:
         self.parser.add_argument("--use_normal_v2",
                                  help="if set, calc normal vectors from depth and used in cvo calculation, using the custom operation PtSampleInGridCalcNormal",
                                  action="store_true")
+        self.parser.add_argument("--random_ell",
+                                 help="if set, the length scale of geometric kernel is selected randomly following a certain distribution",
+                                 action="store_true")
+        ######## for val_set
+        self.parser.add_argument("--val_set_only", 
+                                 help="if set, only run val_set on pretrained weights", 
+                                 action="store_true")
+        self.parser.add_argument("--load_weights_folder_parent", 
+                                 type=str,
+                                 help="parent path of models to load, needed for val_set_only")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",
