@@ -193,6 +193,20 @@ class MonodepthOptions:
                                  type=float, 
                                  help="if not zero, the length scale is proportional to the depth of gt points when the depth is larger than this value. If zero, ell is constant",
                                  default=0)
+        self.parser.add_argument("--norm_in_dist",
+                                 help="if set, the normal information will be used in exp kernel besides as a coefficient term. Neet use_normal_v2 to be true to be effective",
+                                 action="store_true")
+        self.parser.add_argument("--res_mag_min",
+                                 type=float, 
+                                 help="the minimum value for the normal kernel (or viewing it as a coefficient of geometric kernel)",
+                                 default=0.1)
+        self.parser.add_argument("--res_mag_max",
+                                 type=float, 
+                                 help="the maximum value for the normal kernel (or viewing it as a coefficient of geometric kernel)",
+                                 default=2)
+        self.parser.add_argument("--disable_log",
+                                 help="if set, no logging of this training trial will be logged to hard drive",
+                                 action="store_true")
         ######## for val_set
         self.parser.add_argument("--val_set_only", 
                                  help="if set, only run val_set on pretrained weights", 
@@ -209,6 +223,10 @@ class MonodepthOptions:
                                  type=int,
                                  help="number of dataloader workers",
                                  default=12)
+        self.parser.add_argument("--cuda_n",
+                                 type=int, 
+                                 help="which GPU to use",
+                                 default=0)
 
         # LOADING options
         self.parser.add_argument("--load_weights_folder",

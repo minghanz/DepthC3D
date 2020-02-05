@@ -76,7 +76,7 @@ class Trainer:
         self.models = {}
         self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:0")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:{}".format(self.opt.cuda_n))
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
@@ -209,11 +209,22 @@ class Trainer:
         self.val_iter = iter(self.val_loader)
         self.val_count = 0
 
-        self.writers = {}
         self.ctime = time.ctime()
-        for mode in ["train", "val", "val_set"]:
-            # self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
-            self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode + '_' + self.ctime))
+        ## create the path to log files (opt, model, writer, pcd, ...)
+        ## in order to easily switch all loggers on or off by setting the paths to None
+        if self.opt.disable_log:
+            self.path_model = None
+            self.path_opt = None
+            self.path_pcd = None
+            self.writers = None
+        else:
+            self.path_model = os.path.join(self.log_path, "models" + "_"+self.ctime)
+            self.path_opt = self.path_model
+            self.path_pcd = os.path.join(self.log_path, "pcds_"+self.ctime)
+            self.writers = {}
+            for mode in ["train", "val", "val_set"]:
+                # self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
+                self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode + '_' + self.ctime))
 
         if not self.opt.no_ssim:
             self.ssim = SSIM()
@@ -389,11 +400,12 @@ class Trainer:
                 print("GPU memory allocated at the end of iter {}: cur: {:.1f}, {:.1f}; max: {:.1f}, {:.1f}".format(self.step-1, allo, cach, \
                                                                                                                 max_allo, max_cach ))
                 # if (self.step-1) % 100 == 0:
-                self.writers["train"].add_scalar("Mem/allo", allo, self.step-1)
-                self.writers["train"].add_scalar("Mem/cach", cach, self.step-1)
-                
-                self.writers["train"].add_scalar("Mem/max_allo", max_allo, self.step-1)
-                self.writers["train"].add_scalar("Mem/max_cach", max_cach, self.step-1)
+                if self.writers is not None:
+                    self.writers["train"].add_scalar("Mem/allo", allo, self.step-1)
+                    self.writers["train"].add_scalar("Mem/cach", cach, self.step-1)
+                    
+                    self.writers["train"].add_scalar("Mem/max_allo", max_allo, self.step-1)
+                    self.writers["train"].add_scalar("Mem/max_cach", max_cach, self.step-1)
                     
                 # torch.cuda.reset_peak_stats()
                 torch.cuda.reset_max_memory_cached()
@@ -991,9 +1003,10 @@ class Trainer:
 
     def save_pcd_from_concat_flat(self, frame_id, scale, gt_flag, n_pts, outputs=None, xyz_grad=None, xyz=None):
         with torch.no_grad():
-            path_pcd = os.path.join(self.log_path, "pcds_"+self.ctime)
-            if not os.path.exists(path_pcd):
-                os.makedirs(path_pcd)
+            if self.path_pcd is None:
+                return
+            if not os.path.exists(self.path_pcd):
+                os.makedirs(self.path_pcd)
 
             if xyz_grad is None:
                 assert outputs is not None and xyz is None
@@ -1001,7 +1014,7 @@ class Trainer:
                 assert outputs is None and xyz is not None
 
             for ib in range(self.opt.batch_size):
-                filename = os.path.join(path_pcd, "{}_{}_{}_{}_{}_{}".format(self.step, frame_id, scale, gt_flag, ib, self.train_flag) )
+                filename = os.path.join(self.path_pcd, "{}_{}_{}_{}_{}_{}".format(self.step, frame_id, scale, gt_flag, ib, self.train_flag) )
 
                 if xyz_grad is None:
                     xyz = outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
@@ -1063,11 +1076,6 @@ class Trainer:
         grid_nres[uvb_split[2], :, uvb_split[1], uvb_split[0]] = flat_nres_t
 
         return grid_info, grid_nres
-        
-    def set_normal_params(self):
-        self.res_mag_max = 2
-        self.res_mag_min = 0.1
-        self.norm_in_dist = True
 
     def normal_from_depth(self, frame_id, scale, outputs, gt_flag):
         #### generate depth normal and confidence
@@ -1081,7 +1089,6 @@ class Trainer:
         self.equi_dist = 0.05
         # self.ref_nres = 0.1
         # self.ref_nres_sqrt = math.sqrt(self.ref_nres)
-        self.set_normal_params()
 
         num_in_kern = self.kern_normal[0]*self.kern_normal[1]
         xyz_grid = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
@@ -1319,7 +1326,7 @@ class Trainer:
                         flat_nres = outputs[("flat_nres", flat_idx, scale, grid_idx, flat_gt)].contiguous()
                         grid_nres = outputs[("grid_nres", grid_idx, scale, grid_idx, grid_gt)].contiguous()
                         inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
-                            flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.res_mag_max, self.res_mag_min, False, self.norm_in_dist, self.opt.ell_basedist)
+                            flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist)
                         
                         try:
                             assert not (inp_feat_dict[combo][scale]==0).all(), "{}{} is all zero".format(combo, scale)
@@ -2459,6 +2466,8 @@ class Trainer:
     def log(self, mode, inputs, outputs, losses):
         """Write an event to the tensorboard events file
         """
+        if self.writers is None:
+            return
         writer = self.writers[mode]
         for l, v in losses.items():
             writer.add_scalar("{}".format(l), v, self.step)
@@ -2537,18 +2546,21 @@ class Trainer:
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with
         """
-        models_dir = os.path.join(self.log_path, "models" + "_"+self.ctime)
-        if not os.path.exists(models_dir):
-            os.makedirs(models_dir)
+        if self.path_opt is None: ## don't save the file if path_opt is set to None
+            return
+        if not os.path.exists(self.path_opt):
+            os.makedirs(self.path_opt)
         to_save = self.opt.__dict__.copy()
 
-        with open(os.path.join(models_dir, 'opt.json'), 'w') as f:
+        with open(os.path.join(self.path_opt, 'opt.json'), 'w') as f:
             json.dump(to_save, f, indent=2)
 
     def save_model(self):
         """Save model weights to disk
         """
-        save_folder = os.path.join(self.log_path, "models" + "_"+self.ctime, "weights_{}".format(self.epoch))
+        if self.path_model is None:
+            return
+        save_folder = os.path.join(self.path_model, "weights_{}".format(self.epoch))
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
 
