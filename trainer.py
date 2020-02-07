@@ -52,6 +52,8 @@ warnings.filterwarnings("ignore")
 import math
 from pcl_vis import visualize_pcl
 
+# import objgraph ## this is for debugging memory leak, but turns out not providing much useful information
+
 def my_collate_fn(batch):
     batch_new = {}
     for item in batch[0]:
@@ -251,6 +253,40 @@ class Trainer:
 
         self.save_opts()
 
+        self.set_other_params_from_opt() # moved from get_innerp_from_grid_flat
+
+    def set_other_params_from_opt(self):
+        
+        if self.opt.dense_flat_grid:
+            self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
+            if self.opt.sup_cvo_pose_lidar:
+                self.dist_combos.append((0, 1, True, True))
+                self.dist_combos.append((0, -1, True, True))
+            if self.opt.align_preds:
+                self.dist_combos.append( (0, 1, False, False) )
+                self.dist_combos.append( (0, -1, False, False) )
+                
+            # self.dist_combos = [(0, 1, False, False), (0, -1, False, False)]
+            # inp_combos = self.inp_combo_from_dist_combo(dist_combos)
+
+            if self.opt.use_panoptic:
+                self.feats_cross = ["xyz", "seman"]
+                self.feats_self = ["xyz", "panop"]
+            else:
+                self.feats_cross = ["xyz", "hsv"]
+                self.feats_self = ["xyz", "hsv"]
+            
+            # feats_needed = ["xyz", "hsv"]
+            self.feats_ell = {}
+            if self.opt.random_ell:
+                self.feats_ell["xyz"] = np.abs(0.05* np.random.normal()) + 0.02
+            else:
+                self.feats_ell["xyz"] = 0.05
+            self.feats_ell["hsv"] = 0.2
+            self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
+            self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
+
+
     def set_train(self):
         """Convert all models to training mode
         """
@@ -365,7 +401,7 @@ class Trainer:
                 # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
                 # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
                 loss += losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
-            if self.opt.sup_cvo_pose_lidar:
+            if self.opt.sup_cvo_pose_lidar and not self.opt.dense_flat_grid:
                 loss += 0.1 * losses["loss_pose/cos_sum"] / self.num_scales / self.opt.iters_per_update
             loss.backward()
 
@@ -416,6 +452,13 @@ class Trainer:
             #             print(type(obj), obj.size())
             #     except:
             #         pass
+
+            # objgraph.show_most_common_types()
+            # objgraph.show_growth()
+            # new_ids = objgraph.get_new_ids()
+            # objgraph.get_leaking_objects()
+
+            # print(self.step, '---------')
         
         self.model_lr_scheduler.step()
 
@@ -1047,8 +1090,6 @@ class Trainer:
         outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)] = normal
         outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)] = res
         # self.print_range(res, pre_msg="{} {} {}".format(frame_id, scale, gt_flag))
-
-        self.set_normal_params()
     
     def print_range(self, tensor, pre_msg=None):
         with torch.no_grad():
@@ -1200,27 +1241,40 @@ class Trainer:
         # print("normed_normal min:", float(normed_normal.min()), "max:", float(normed_normal.max()), "mean:", float(normed_normal.mean()), "median:", float(normed_normal.median()) )
         # print("valid_n_pts min:", float(valid_n_pts.min()), "max:", float(valid_n_pts.max()), "mean:", float(valid_n_pts.mean()), "median:", float(valid_n_pts.median()) )
 
+    def concat_flat_dummy(self, outputs):
+        """
+        This concat simply implement the simplest case
+        """
+        for item in outputs:
+            if "flat_" in item[0]:
+                to_cat = []
+
+                for ib in range(self.opt.batch_size):
+                    to_cat.append(outputs[item][ib])
+
+                outputs[item] = torch.cat(to_cat, dim=2)
+
 
     def concat_flat(self, outputs):
         dict_for_new_item = {}
         for item in outputs:
-            if "flat_" in item[0]:
+            if "flat_" in item[0]:  ## All "flat_*" needs to be processed
                 to_cat = []
                 new_item = item
-                if "flat_uv" in item[0]:
+                if "flat_uv" in item[0]: ## "flat_uv" needs to be processed to "flat_uvb" 
                     new_item = list(item)
                     new_item[0] = "flat_uvb"
                     new_item = tuple(new_item)
 
                 for ib in range(self.opt.batch_size):
-                    if "flat_uv" in item[0]:
+                    if "flat_uv" in item[0]:                    ## Create "flat_uvb"
                         n_pts = outputs[item][ib].shape[-1]
                         frame_indicater = torch.ones((1,1,n_pts), dtype=outputs[item][ib].dtype, device=self.device) * ib
                         flat_iuv = torch.cat([outputs[item][ib], frame_indicater ], dim=1) # here requires_grad=False
                         to_cat.append(flat_iuv)
-                    elif "flat_panop" in item[0]:
+                    elif "flat_panop" in item[0]:               ## Do not concat "flat_panop"
                         continue # Don't concatenate, because diff images may have diff # of channels # each item of the list has 1*C*N
-                    else:
+                    else:                                       ## Others just simply concat
                         to_cat.append(outputs[item][ib])
 
                 if "flat_panop" not in item[0]:
@@ -1264,30 +1318,25 @@ class Trainer:
         # print("inp_feat_combos:", inp_feat_combos)
         return inp_feat_combos
 
-
+    def get_innerp_from_grid_flat_dummy(self, outputs):
+        dist_dict = {}
+        cos_dict = {}
+        inp_dict = {}
+        for combo in self.dist_combos:
+            dist_dict[combo] = {}
+            cos_dict[combo] = {}
+            inp_dict[combo] = {}
+            for scale in self.opt.scales:
+                dist_dict[combo][scale] = torch.tensor(1., device=self.device)
+                cos_dict[combo][scale] = torch.tensor(1., device=self.device)
+                inp_dict[combo][scale] = torch.tensor(1., device=self.device)
+        
+        return inp_dict, dist_dict, cos_dict
+                
 
     def get_innerp_from_grid_flat(self, outputs):
-        self.dist_combos = [(0, 1, True, False), (0, 0, True, False), (0, -1, True, False)]
-        # self.dist_combos = [(0, 1, False, False), (0, -1, False, False)]
-        # inp_combos = self.inp_combo_from_dist_combo(dist_combos)
-
-        if self.opt.use_panoptic:
-            self.feats_cross = ["xyz", "seman"]
-            self.feats_self = ["xyz", "panop"]
-        else:
-            self.feats_cross = ["xyz", "hsv"]
-            self.feats_self = ["xyz", "hsv"]
+        
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
-
-        # feats_needed = ["xyz", "hsv"]
-        self.feats_ell = {}
-        if self.opt.random_ell:
-            self.feats_ell["xyz"] = np.abs(0.05* np.random.normal()) + 0.02
-        else:
-            self.feats_ell["xyz"] = 0.05
-        self.feats_ell["hsv"] = 0.2
-        self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
-        self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
         
         neighbor_range = int(2)
         inp_feat_dict = {}
@@ -1417,6 +1466,11 @@ class Trainer:
                 # cos_dict[combo][scale] = 1 - innerp_dict[tags[0]][scale] / torch.sqrt( torch.max( innerp_dict[tags[1]][scale] * innerp_dict[tags[2]][scale], torch.zeros_like(innerp_dict[tags[2]][scale])+1e-7 ) )
 
         return inp_dict, dist_dict, cos_dict
+
+    def reg_cvo_to_loss_dummy(self, losses, inp_dict, dist_dict, cos_dict):
+        losses["loss_cvo/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+        losses["loss_cos/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
+        losses["loss_inp/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
 
     def reg_cvo_to_loss(self, losses, inp_dict, dist_dict, cos_dict):
         losses["loss_cvo/sum"] =  torch.tensor(0, dtype=torch.float32, device=self.device)
@@ -2053,16 +2107,19 @@ class Trainer:
             if not self.opt.dense_flat_grid:
                 innerps = self.gen_innerp_dense(inputs, outputs)
             else:
-                self.concat_flat(outputs)
-                if self.opt.use_normal_v2:
+                self.concat_flat(outputs) 
+                # self.concat_flat_dummy(outputs) ## ZMH: for memory leak debug
+                if self.opt.use_normal_v2:        ## ZMH: comment this line for memory leak debug
                     self.get_grid_flat_normal(outputs)
                 
 
-                if self.step % 4000 == 0:
+                if self.step % 4000 == 0: ## ZMH: comment this line for memory leak debug! 
                     self.save_pcd(outputs)
 
                 innerps, dists, coss = self.get_innerp_from_grid_flat(outputs)
+                # innerps, dists, coss = self.get_innerp_from_grid_flat_dummy(outputs) ## ZMH: for memory leak debug 
                 self.reg_cvo_to_loss(losses, innerps, dists, coss)
+                # self.reg_cvo_to_loss_dummy(losses, innerps, dists, coss)  ## ZMH: for memory leak debug 
 
 
         if self.opt.sup_cvo_pose_lidar: # not self.train_flag or (this is used for evaluating cvo pose loss in baseline mode)

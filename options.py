@@ -207,6 +207,9 @@ class MonodepthOptions:
         self.parser.add_argument("--disable_log",
                                  help="if set, no logging of this training trial will be logged to hard drive",
                                  action="store_true")
+        self.parser.add_argument("--align_preds",
+                                 help="if set, inner prod between predictions of adjacent frames are included in loss",
+                                 action="store_true")
         ######## for val_set
         self.parser.add_argument("--val_set_only", 
                                  help="if set, only run val_set on pretrained weights", 

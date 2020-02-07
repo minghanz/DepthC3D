@@ -17,6 +17,19 @@ class PtSampleInGrid(Function):
         ctx.sqr = sqr
         ctx.ell_basedist = ell_basedist
         return outputs
+    # def forward(ctx, pts, pts_info, grid_source, grid_valid, neighbor_range, ell, ignore_ib=False, sqr=True, ell_basedist=0):
+    #     """ pts: B*2*N, pts_info: B*C*N, grid_source: B*C*H*W (C could be xyz, rgb, ...), grid_valid: B*1*H*W, neighbor_range: int
+    #     dummy version for memory leak debug
+    #     """
+    #     outputs = torch.ones( (1,(2*neighbor_range+1)*(2*neighbor_range+1), pts.shape[-1]), device=pts_info.device )
+    #     # ctx.save_for_backward(outputs, pts, pts_info, grid_source, grid_valid)
+    #     ctx.save_for_backward(pts, pts_info, grid_source, grid_valid)
+    #     ctx.neighbor_range = neighbor_range
+    #     ctx.ell = ell
+    #     ctx.ignore_ib = ignore_ib
+    #     ctx.sqr = sqr
+    #     ctx.ell_basedist = ell_basedist
+    #     return outputs
 
     @staticmethod
     def backward(ctx, dy):
@@ -26,6 +39,15 @@ class PtSampleInGrid(Function):
         # dx1, dx2 = cvo_dense_samp.backward(dy, outputs, pts, pts_info, grid_source, grid_valid, ctx.neighbor_range, ctx.ell, ctx.ignore_ib)
         dx1, dx2 = cvo_dense_samp.backward(dy, pts, pts_info, grid_source, grid_valid, ctx.neighbor_range, ctx.ell, ctx.ignore_ib, ctx.sqr, ctx.ell_basedist)
         return None, dx1, dx2, None, None, None, None, None, None
+    # def backward(ctx, dy): ## dummy version for memory leak debug
+    #     # outputs, pts, pts_info, grid_source, grid_valid = ctx.saved_tensors
+    #     pts, pts_info, grid_source, grid_valid = ctx.saved_tensors
+    #     dy = dy.contiguous()
+    #     # dx1, dx2 = cvo_dense_samp.backward(dy, outputs, pts, pts_info, grid_source, grid_valid, ctx.neighbor_range, ctx.ell, ctx.ignore_ib)
+    #     # dx1, dx2 = cvo_dense_samp.backward(dy, pts, pts_info, grid_source, grid_valid, ctx.neighbor_range, ctx.ell, ctx.ignore_ib, ctx.sqr, ctx.ell_basedist)
+    #     dx1 = torch.zeros_like(pts_info)
+    #     dx2 = torch.zeros_like(grid_source)
+    #     return None, dx1, dx2, None, None, None, None, None, None
 
 
 class PtSampleInGridAngle(Function):
