@@ -278,10 +278,12 @@ class Trainer:
             
             # feats_needed = ["xyz", "hsv"]
             self.feats_ell = {}
-            if self.opt.random_ell:
-                self.feats_ell["xyz"] = np.abs(0.05* np.random.normal()) + 0.02
-            else:
-                self.feats_ell["xyz"] = 0.05
+            # self.ell_base = 0.05
+            self.ell_base = self.opt.ell_geo
+            # if self.opt.random_ell:
+            #     self.feats_ell["xyz"] = np.abs(self.ell_base* np.random.normal()) + 0.02
+            # else:
+            #     self.feats_ell["xyz"] = self.ell_base
             self.feats_ell["hsv"] = 0.2
             self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
             self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
@@ -1335,10 +1337,16 @@ class Trainer:
                 
 
     def get_innerp_from_grid_flat(self, outputs):
+
+        if self.opt.random_ell:
+            self.feats_ell["xyz"] = np.abs(self.ell_base* np.random.normal()) + 0.02
+        else:
+            self.feats_ell["xyz"] = self.ell_base
         
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
         
-        neighbor_range = int(2)
+        # neighbor_range = int(2)
+        neighbor_range = self.opt.neighbor_range
         inp_feat_dict = {}
         for combo in inp_feat_combos:
             inp_feat_dict[combo] = {}
