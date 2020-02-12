@@ -278,11 +278,12 @@ class Trainer:
             
             # feats_needed = ["xyz", "hsv"]
             self.feats_ell = {}
+            # self.ell_base = 0.05
             self.ell_base = self.opt.ell_geo
             # if self.opt.random_ell:
-            #     self.feats_ell["xyz"] = np.abs(0.05* np.random.normal()) + 0.02
+            #     self.feats_ell["xyz"] = np.abs(self.ell_base* np.random.normal()) + 0.02
             # else:
-            #     self.feats_ell["xyz"] = 0.05
+            #     self.feats_ell["xyz"] = self.ell_base
             self.feats_ell["hsv"] = 0.2
             self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
             self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
