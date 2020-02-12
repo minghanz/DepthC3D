@@ -278,10 +278,11 @@ class Trainer:
             
             # feats_needed = ["xyz", "hsv"]
             self.feats_ell = {}
-            if self.opt.random_ell:
-                self.feats_ell["xyz"] = np.abs(0.05* np.random.normal()) + 0.02
-            else:
-                self.feats_ell["xyz"] = 0.05
+            self.ell_base = self.opt.ell_geo
+            # if self.opt.random_ell:
+            #     self.feats_ell["xyz"] = np.abs(0.05* np.random.normal()) + 0.02
+            # else:
+            #     self.feats_ell["xyz"] = 0.05
             self.feats_ell["hsv"] = 0.2
             self.feats_ell["panop"] = 0.2    # in Angle mode this is not needed
             self.feats_ell["seman"] = 0.2    # in Angle mode this is not needed
@@ -967,7 +968,7 @@ class Trainer:
                             outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)][ib] = torch.matmul(Ri, outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)][ib])
                             outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)][ib]
 
-    def get_grid_flat_normal(self, outputs):
+    def get_grid_flat_normal(self, outputs, n_pts_dict):
         """ after concat_flat, before calc inner product
         """
         ## loop over all frame_id and scale
@@ -980,7 +981,7 @@ class Trainer:
                     ## 2. grid_normal and grid_nres from flat_normal and flat_nres (same frame)
                     outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)], \
                         outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)] = \
-                        self.grid_from_concated_flat(flat_uvb=outputs[("flat_uvb", frame_id, scale, frame_id, gt_flag)], \
+                        self.grid_from_concated_flat(flat_uvb=outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)], \
                                                     flat_info=outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)], \
                                                     flat_nres=outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)], \
                                                     grid_xyz_shape=outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)].shape)
@@ -991,7 +992,7 @@ class Trainer:
                     n_pts = {}
                     n_pts[0] = 0
                     for ib in range(self.opt.batch_size):
-                        n_pts[ib+1] = n_pts[ib] + outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib].shape[2] # flat_uv is not flattened
+                        n_pts[ib+1] = n_pts[ib] + n_pts_dict[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib] # flat_uv is not flattened
 
                     if frame_id == 0:
                         id_pairs = [(0,1), (0,-1)]
@@ -1025,14 +1026,14 @@ class Trainer:
         xyz_grad_flat = self.flat_from_grid_single_item(grid_valid, xyz_grad_grid) # not concatenated
         self.save_pcd_from_concat_flat(frame_id, scale, gt_flag, n_pts, xyz_grad=xyz_grad_flat, xyz=xyz)
 
-    def save_pcd(self, outputs):
+    def save_pcd(self, outputs, n_pts_dict):
         frame_id = 0
         for scale in self.opt.scales:
             for gt_flag in [True, False]:
                 n_pts = {}
                 n_pts[0] = 0
                 for ib in range(self.opt.batch_size):
-                    n_pts[ib+1] = n_pts[ib] + outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib].shape[2] # flat_uv is not flattened
+                    n_pts[ib+1] = n_pts[ib] + n_pts_dict[("flat_uv", frame_id, scale, frame_id, gt_flag)][ib] 
                 
                 self.save_pcd_from_concat_flat(frame_id, scale, gt_flag, n_pts, outputs=outputs)
 
@@ -1079,7 +1080,7 @@ class Trainer:
                         f.write( str(float(grad_norm_max)) )
 
     def normal_from_depth_v2(self, outputs, frame_id, scale, gt_flag):
-        pts = outputs[("flat_uvb", frame_id, scale, frame_id, gt_flag)]
+        pts = outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)]
         grid_source = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
         grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
         neighbor_range = int(5)
@@ -1241,30 +1242,21 @@ class Trainer:
         # print("normed_normal min:", float(normed_normal.min()), "max:", float(normed_normal.max()), "mean:", float(normed_normal.mean()), "median:", float(normed_normal.median()) )
         # print("valid_n_pts min:", float(valid_n_pts.min()), "max:", float(valid_n_pts.max()), "mean:", float(valid_n_pts.mean()), "median:", float(valid_n_pts.median()) )
 
-    def concat_flat_dummy(self, outputs):
+    def concat_flat(self, outputs):
         """
-        This concat simply implement the simplest case
+        This concat does not create new items in the outputs dict
         """
+        n_pts_dict = {}
         for item in outputs:
             if "flat_" in item[0]:
                 to_cat = []
-
-                for ib in range(self.opt.batch_size):
-                    to_cat.append(outputs[item][ib])
-
-                outputs[item] = torch.cat(to_cat, dim=2)
-
-
-    def concat_flat(self, outputs):
-        dict_for_new_item = {}
-        for item in outputs:
-            if "flat_" in item[0]:  ## All "flat_*" needs to be processed
-                to_cat = []
-                new_item = item
-                if "flat_uv" in item[0]: ## "flat_uv" needs to be processed to "flat_uvb" 
-                    new_item = list(item)
-                    new_item[0] = "flat_uvb"
-                    new_item = tuple(new_item)
+                # new_item = item
+                # if "flat_uv" in item[0]: ## "flat_uv" needs to be processed to "flat_uvb" 
+                #     new_item = list(item)
+                #     new_item[0] = "flat_uvb"
+                #     new_item = tuple(new_item)
+                if "flat_uv" in item[0]:
+                    n_pts_dict[item] = {}
 
                 for ib in range(self.opt.batch_size):
                     if "flat_uv" in item[0]:                    ## Create "flat_uvb"
@@ -1272,20 +1264,16 @@ class Trainer:
                         frame_indicater = torch.ones((1,1,n_pts), dtype=outputs[item][ib].dtype, device=self.device) * ib
                         flat_iuv = torch.cat([outputs[item][ib], frame_indicater ], dim=1) # here requires_grad=False
                         to_cat.append(flat_iuv)
+                        n_pts_dict[item][ib] = n_pts
                     elif "flat_panop" in item[0]:               ## Do not concat "flat_panop"
                         continue # Don't concatenate, because diff images may have diff # of channels # each item of the list has 1*C*N
                     else:                                       ## Others just simply concat
                         to_cat.append(outputs[item][ib])
 
                 if "flat_panop" not in item[0]:
-                    if new_item != item:
-                        dict_for_new_item[new_item] = torch.cat(to_cat, dim=2)
-                    else:
-                        outputs[new_item] = torch.cat(to_cat, dim=2)    # 1*C*(N1+...+Nb)
+                    outputs[item] = torch.cat(to_cat, dim=2)
         
-        for item in dict_for_new_item:
-            outputs[item] = dict_for_new_item[item]
-                  
+        return n_pts_dict
                     
     def inp_combo_from_dist_combo(self, dist_combos):
         inp_combos = []
@@ -1334,11 +1322,17 @@ class Trainer:
         return inp_dict, dist_dict, cos_dict
                 
 
-    def get_innerp_from_grid_flat(self, outputs):
+    def get_innerp_from_grid_flat(self, outputs, n_pts_dict):
         
+        if self.opt.random_ell:
+            self.feats_ell["xyz"] = np.abs(self.ell_base* np.random.normal()) + self.opt.ell_min
+        else:
+            self.feats_ell["xyz"] = self.ell_base
+
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
         
-        neighbor_range = int(2)
+        # neighbor_range = int(2)
+        neighbor_range = self.opt.neighbor_range
         inp_feat_dict = {}
         for combo in inp_feat_combos:
             inp_feat_dict[combo] = {}
@@ -1348,9 +1342,14 @@ class Trainer:
                 ell = float(self.feats_ell[feat])
                 if feat == "panop":
                     inn_list = []
+                    n_pts = {}
+                    n_pts[0] = 0
                     for ib in range(self.opt.batch_size):
                         grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)][ib:ib+1]
-                        flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)][ib]
+
+                        n_pts[ib+1] = n_pts[ib] + n_pts_dict[("flat_uv", flat_idx, scale, grid_idx, flat_gt)][ib] # flat_uv is not flattened
+                        flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)][:, :, n_pts[ib]:n_pts[ib+1] ]
+
                         flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)][ib]
                         grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)][ib]
 
@@ -1364,7 +1363,7 @@ class Trainer:
                     inp_feat_dict[combo][scale] = torch.cat(inn_list, dim=2) #1 * NN * N
                 else:
                     grid_valid = outputs[("grid_valid", grid_idx, scale, grid_idx, grid_gt)]
-                    flat_uv = outputs[("flat_uvb", flat_idx, scale, grid_idx, flat_gt)]
+                    flat_uv = outputs[("flat_uv", flat_idx, scale, grid_idx, flat_gt)]
                     flat_info = outputs[("flat_"+feat, flat_idx, scale, grid_idx, flat_gt)]
                     grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
                     if feat == "seman":
@@ -2107,16 +2106,15 @@ class Trainer:
             if not self.opt.dense_flat_grid:
                 innerps = self.gen_innerp_dense(inputs, outputs)
             else:
-                self.concat_flat(outputs) 
-                # self.concat_flat_dummy(outputs) ## ZMH: for memory leak debug
+                n_pts_dict = self.concat_flat(outputs) ## ZMH: current version fixed the memory leak
                 if self.opt.use_normal_v2:        ## ZMH: comment this line for memory leak debug
-                    self.get_grid_flat_normal(outputs)
+                    self.get_grid_flat_normal(outputs, n_pts_dict)
                 
 
                 if self.step % 4000 == 0: ## ZMH: comment this line for memory leak debug! 
-                    self.save_pcd(outputs)
+                    self.save_pcd(outputs, n_pts_dict)
 
-                innerps, dists, coss = self.get_innerp_from_grid_flat(outputs)
+                innerps, dists, coss = self.get_innerp_from_grid_flat(outputs, n_pts_dict)
                 # innerps, dists, coss = self.get_innerp_from_grid_flat_dummy(outputs) ## ZMH: for memory leak debug 
                 self.reg_cvo_to_loss(losses, innerps, dists, coss)
                 # self.reg_cvo_to_loss_dummy(losses, innerps, dists, coss)  ## ZMH: for memory leak debug 

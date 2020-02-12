@@ -217,6 +217,18 @@ class MonodepthOptions:
         self.parser.add_argument("--load_weights_folder_parent", 
                                  type=str,
                                  help="parent path of models to load, needed for val_set_only")
+        self.parser.add_argument("--neighbor_range",
+                                 type=int,
+                                 help="neighbor range when calculating inner product",
+                                 default=2)
+        self.parser.add_argument("--ell_geo",
+                                 type=float, 
+                                 help="the ell used in geometric kernel",
+                                 default=0.05)
+        self.parser.add_argument("--ell_min",
+                                 type=float, 
+                                 help="the minimal ell used in geometric kernel",
+                                 default=0.05)
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",
