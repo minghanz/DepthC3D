@@ -13,6 +13,8 @@ from options import MonodepthOptions
 import datasets
 import networks
 
+import time
+
 cv2.setNumThreads(0)  # This speeds up evaluation 5x on our unix systems (OpenCV 3.3.1)
 
 
@@ -23,6 +25,7 @@ splits_dir = os.path.join(os.path.dirname(__file__), "splits")
 # to convert our stereo predictions to real-world scale we multiply our depths by 5.4.
 STEREO_SCALE_FACTOR = 5.4
 
+from trainer import my_collate_fn
 
 def compute_errors(gt, pred):
     """Computation of error metrics between predicted and ground truth depths
@@ -78,24 +81,26 @@ def evaluate(opt):
         encoder_path = os.path.join(opt.load_weights_folder, "encoder.pth")
         decoder_path = os.path.join(opt.load_weights_folder, "depth.pth")
 
-        encoder_dict = torch.load(encoder_path)
+        encoder_dict = torch.load(encoder_path, map_location=torch.device("cuda:0"))
 
         dataset = datasets.KITTIRAWDataset(opt.data_path, filenames,
                                            encoder_dict['height'], encoder_dict['width'],
                                            [0], 4, is_train=False)
+        # dataloader = DataLoader(dataset, 16, shuffle=False, num_workers=opt.num_workers,
+        #                         pin_memory=True, drop_last=False)
         dataloader = DataLoader(dataset, 16, shuffle=False, num_workers=opt.num_workers,
-                                pin_memory=True, drop_last=False)
+                                pin_memory=True, drop_last=False, collate_fn=my_collate_fn) ## the default collate_fn will fail because there are non-deterministic length sample
 
         encoder = networks.ResnetEncoder(opt.num_layers, False)
         depth_decoder = networks.DepthDecoder(encoder.num_ch_enc)
 
         model_dict = encoder.state_dict()
         encoder.load_state_dict({k: v for k, v in encoder_dict.items() if k in model_dict})
-        depth_decoder.load_state_dict(torch.load(decoder_path))
+        depth_decoder.load_state_dict(torch.load(decoder_path, map_location=torch.device("cuda:0")))
 
-        encoder.cuda()
+        encoder.cuda(0)
         encoder.eval()
-        depth_decoder.cuda()
+        depth_decoder.cuda(0)
         depth_decoder.eval()
 
         pred_disps = []
@@ -105,7 +110,7 @@ def evaluate(opt):
 
         with torch.no_grad():
             for data in dataloader:
-                input_color = data[("color", 0, 0)].cuda()
+                input_color = data[("color", 0, 0)].cuda(0)
 
                 if opt.post_process:
                     # Post-processed results require each image to have two forward passes
@@ -162,7 +167,9 @@ def evaluate(opt):
         print("-> No ground truth is available for the KITTI benchmark, so not evaluating. Done.")
         quit()
 
-    gt_path = os.path.join(splits_dir, opt.eval_split, "gt_depths.npz")
+    # gt_path = os.path.join(splits_dir, opt.eval_split, "gt_depths.npz")
+    # gt_path = os.path.join(splits_dir, opt.eval_split, "gt_depths_im_ori.npz") ## ZMH: use the gt produced by vel_depth=False in generate_depth_map_original
+    gt_path = os.path.join(splits_dir, opt.eval_split, "gt_depths_im_cus.npz") ## ZMH: use the gt produced by vel_depth=False in generate_depth_map_original
     ## ZMH:
     gt_depths = np.load(gt_path, fix_imports=True, encoding='latin1', allow_pickle=True)["data"]
     # gt_depths = np.load(gt_path, fix_imports=True, encoding='latin1')["data"]
@@ -229,4 +236,10 @@ def evaluate(opt):
 
 if __name__ == "__main__":
     options = MonodepthOptions()
-    evaluate(options.parse())
+    # evaluate(options.parse())
+    opts, rest = options.parse()
+    time_start = time.time()
+    evaluate(opts)
+
+    time_end = time.time()
+    print("Time elapsed:", time_end-time_start)

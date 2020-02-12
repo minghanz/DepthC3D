@@ -13,7 +13,9 @@ import numpy as np
 import PIL.Image as pil
 
 from utils import readlines
-from kitti_utils import generate_depth_map
+# from kitti_utils import generate_depth_map
+from kitti_utils import generate_depth_map_original, generate_depth_map, project_lidar_to_img
+import time
 
 
 def export_gt_depths_kitti():
@@ -46,15 +48,30 @@ def export_gt_depths_kitti():
             calib_dir = os.path.join(opt.data_path, folder.split("/")[0])
             velo_filename = os.path.join(opt.data_path, folder,
                                          "velodyne_points/data", "{:010d}.bin".format(frame_id))
-            gt_depth = generate_depth_map(calib_dir, velo_filename, 2, True)
+            # gt_depth = generate_depth_map(calib_dir, velo_filename, 2, True) ## ZMH: This won't work because the generate_depth_map function has been redefined.
+            # gt_depth = generate_depth_map_original(calib_dir, velo_filename, 2, True) ## ZMH: the original function in monodepth2
+            # gt_depth = generate_depth_map_original(calib_dir, velo_filename, 2, False) ## ZMH: the original function in monodepth2, use transformed depth
+
+            velo_rect, P_rect_norm, im_shape  = generate_depth_map(calib_dir, velo_filename, 2)
+            gt_depth = project_lidar_to_img(velo_rect, P_rect_norm, im_shape)                   ## ZMH: the way gt is generated I used in training
+
         elif opt.split == "eigen_benchmark":
+            # gt_depth_path = os.path.join(opt.data_path, folder, "proj_depth",
+            #                              "groundtruth", "image_02", "{:010d}.png".format(frame_id))
             gt_depth_path = os.path.join(opt.data_path, folder, "proj_depth",
+                                         "groundtruth", "image_02", "{:010d}.png".format(frame_id), 'val', folder.split("/")[1], "proj_depth",
                                          "groundtruth", "image_02", "{:010d}.png".format(frame_id))
+            if not os.path.exists(gt_depth_path):
+                gt_depth_path = os.path.join(opt.data_path, folder, "proj_depth",
+                                         "groundtruth", "image_02", "{:010d}.png".format(frame_id), 'train', folder.split("/")[1], "proj_depth",
+                                         "groundtruth", "image_02", "{:010d}.png".format(frame_id))
+                if not os.path.exists(gt_depth_path):
+                    raise ValueError("This file does not exist! {} {}".format(folder, frame_id))
             gt_depth = np.array(pil.open(gt_depth_path)).astype(np.float32) / 256
 
         gt_depths.append(gt_depth.astype(np.float32))
 
-    output_path = os.path.join(split_folder, "gt_depths.npz")
+    output_path = os.path.join(split_folder, "gt_depths_im_cus.npz")
 
     print("Saving to {}".format(opt.split))
 
@@ -62,4 +79,7 @@ def export_gt_depths_kitti():
 
 
 if __name__ == "__main__":
+    time_0 = time.time()
     export_gt_depths_kitti()
+    time_1 = time.time()
+    print("Time elapsed:", time_1 - time_0)

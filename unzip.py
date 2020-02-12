@@ -2,6 +2,10 @@ import zipfile
 import re
 import os
 
+##### This script is to extract new kitti depth dataset (with denser ground truth as depth images) into the corresponding folders of sequences
+##### This includes train and val data.
+##### The test_files.txt in engen_benchmark split mostly corresponds to files in val folder in this zip, except that 09_28 images are in train set. 
+
 file_name = "data_download/data_depth_annotated.zip"
 target_folder = "kitti_data"
 
