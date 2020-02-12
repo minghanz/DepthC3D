@@ -21,6 +21,9 @@ from skimage.morphology import binary_dilation, binary_closing
 
 from kitti_utils import project_lidar_to_img, flip_lidar
 
+from torch.utils.data.sampler import Sampler, SubsetRandomSampler
+from torch._six import int_classes as _int_classes
+
 def pil_loader(path):
     # open path as file to avoid ResourceWarning
     # (https://github.com/python-pillow/Pillow/issues/835)
@@ -236,3 +239,70 @@ class MonoDataset(data.Dataset):
 
     def get_depth_related(self, folder, frame_index, side, do_flip, inputs):
         raise NotImplementedError
+
+class SamplerForConcat(Sampler):
+    """For concated dataset, so that every sampled mini-batch are from the same sub-dataset (same size for convenient batching)
+    Directly initialize from dataset instead of Sampler
+    We need three sub samplers, and each time pop out batch size number of indices from one single subset. 
+    """
+
+    def __init__(self, data_source, batch_size, drop_last):
+        self.data_source = data_source
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+
+        if not isinstance(batch_size, _int_classes) or isinstance(batch_size, bool) or \
+                batch_size <= 0:
+            raise ValueError("batch_size should be a positive integer value, "
+                             "but got batch_size={}".format(batch_size))
+        if not isinstance(drop_last, bool):
+            raise ValueError("drop_last should be a boolean value, but got "
+                             "drop_last={}".format(drop_last))
+            
+        ### initialize one sampler for each sub dataset
+        self.sub_sizes = [len(subset) for subset in self.data_source.datasets]
+
+        sub_cumsum = self.data_source.cumulative_sizes.copy()
+        sub_cumsum.insert(0, 0)
+        sub_sampler_indices = [list(range(sub_cumsum[i], sub_cumsum[i+1]) ) for i in range(len(self.sub_sizes)) ]
+        self.sub_samplers = [ SubsetRandomSampler(sub_idxs) for sub_idxs in sub_sampler_indices]
+
+        self.sub_idxs = []
+        for i in range(len(self.sub_sizes)):
+            idx = [i] * self.sub_sizes[i]
+            self.sub_idxs.extend(idx)
+        assert len(self.sub_idxs) == len(self.data_source), "The number of samples are the the same as the sum of each subset"
+        
+        self.num_samples = len(self.sub_idxs)
+
+    def __iter__(self): ## The dataloader creates the iterator object at the beginning of for loop
+        sub_idx_idxs = torch.randperm(self.num_samples).tolist()
+        list_of_sub_iters = [iter(sub_sampler) for sub_sampler in self.sub_samplers ]
+
+        end_reached = [False for _ in self.sub_samplers]
+        for idx_idx in sub_idx_idxs:
+            if all(end_reached):
+                break
+            sub_idx = self.sub_idxs[idx_idx]
+            batch = []
+            while True:
+                try:
+                    idx = next(list_of_sub_iters[sub_idx])
+                except StopIteration:
+                    end_reached[sub_idx] = True
+                    break
+                else:
+                    batch.append(idx)
+                    if len(batch) == self.batch_size:
+                        yield batch
+                        batch = []
+                        break
+            if len(batch) > 0 and not self.drop_last:
+                yield batch
+
+
+    def __len__(self):
+        if self.drop_last:
+            return sum( sub_size//self.batch_size for sub_size in self.sub_sizes )
+        else:
+            return sum( (sub_size+self.batch_size-1) // self.batch_size for sub_size in self.sub_sizes )

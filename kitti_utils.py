@@ -74,7 +74,7 @@ def flip_lidar(velo_rect, P_rect_norm):
 
     return velo_flip
 
-def project_lidar_to_img(pcl_lidar, P_rect_norm, im_shape, vel_depth=False):
+def project_lidar_to_img(pcl_lidar, P_rect_norm, im_shape, vel_depth=False, lyft_mode=False):
     """pcl_lidar: n*4, P_rect_norm: 4*4, im_shape: 2(rows, cols)
     """
     P_rect_K = np.identity(4)
@@ -96,8 +96,13 @@ def project_lidar_to_img(pcl_lidar, P_rect_norm, im_shape, vel_depth=False):
     # the coordinate calculated after multiplication with projection matrix is directly used in plotting. We know that MATLAB use index starting from 1, 
     # which means the projection matrix projects the left-most point in view to u=1. Here in python the index starts from 0, therefore 
     # we should manually subtract one from the result after projection matrix, so that the coordinate still represents the same location in image. 
-    velo_pts_im[:, 0] = np.round(velo_pts_im[:, 0]) - 1
-    velo_pts_im[:, 1] = np.round(velo_pts_im[:, 1]) - 1
+    if not lyft_mode:
+        velo_pts_im[:, 0] = np.round(velo_pts_im[:, 0]) - 1
+        velo_pts_im[:, 1] = np.round(velo_pts_im[:, 1]) - 1
+    else:
+        velo_pts_im[:, 0] = np.round(velo_pts_im[:, 0])
+        velo_pts_im[:, 1] = np.round(velo_pts_im[:, 1])
+        
     val_inds = (velo_pts_im[:, 0] >= 0) & (velo_pts_im[:, 1] >= 0)
     val_inds = val_inds & (velo_pts_im[:, 0] < im_shape[1]) & (velo_pts_im[:, 1] < im_shape[0])
     velo_pts_im = velo_pts_im[val_inds, :]  ## ZMH: n*3 after removing points out of view
@@ -175,3 +180,16 @@ def generate_depth_map(calib_dir, velo_filename, cam=2, vel_depth=False):
         # depth = project_lidar_to_img(velo_rect, P_rect_norm, im_shape)
 
         return velo_rect, P_rect_norm, im_shape ### ZMHL also return the extrinsic (not the same in different date folders)
+
+
+def generate_depth_map_lyft(calib_file, velo_file, cam):
+    calib_info = read_calib_file(calib_file)
+    T_cam_velo = calib_info["Tr_velo_to_cam"]
+    cam_intr = calib_info["P2"]
+
+    velo = load_velodyne_points(velo_file)
+    velo = velo[velo[:, 0] >= 0, :]
+
+    velo_rect = np.dot(T_cam_velo, velo.T).T
+
+    return velo_rect, cam_intr
