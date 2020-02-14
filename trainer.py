@@ -12,7 +12,7 @@ import time
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from tensorboardX import SummaryWriter
 
 import json
@@ -39,7 +39,7 @@ from wrap_to_panoptic import to_panoptic, PanopVis
 
 import threading
 
-from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal, calc_normal, recall_grad
+from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal, calc_normal, recall_grad, grid_from_concat_flat_func, save_tensor_to_img
 
 import torch
 torch.manual_seed(0)
@@ -51,6 +51,9 @@ warnings.filterwarnings("ignore")
 
 import math
 from pcl_vis import visualize_pcl
+
+from kitti_utils import normalize_width
+from datasets.mono_dataset import SamplerForConcat
 
 # import objgraph ## this is for debugging memory leak, but turns out not providing much useful information
 
@@ -70,10 +73,6 @@ class Trainer:
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
         torch_vs = (torch.__version__).split('.')
         self.torch_version = float(torch_vs[0]) + 0.1 * float(torch_vs[1])
-
-        # checking height and width are multiples of 32
-        assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
-        assert self.opt.width % 32 == 0, "'width' must be a multiple of 32"
 
         self.models = {}
         self.parameters_to_train = []
@@ -176,38 +175,123 @@ class Trainer:
         datasets_dict = {"kitti": datasets.KITTIRAWDataset,
                          "kitti_odom": datasets.KITTIOdomDataset, 
                          "kitti_depth": datasets.KITTIDepthDataset, 
-                         "TUM": datasets.TUMRGBDDataset} # ZMH: kitti_depth originally not shown as an option here
-        self.dataset = datasets_dict[self.opt.dataset]
-        self.dataset_val = datasets_dict[self.opt.dataset_val]
+                         "TUM": datasets.TUMRGBDDataset, 
+                         "lyft_1024": datasets.LyftDataset} # ZMH: kitti_depth originally not shown as an option here
+        datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
+                         "kitti_odom": None, 
+                         "kitti_depth": os.path.join(script_path, "kitti_data"), 
+                         "TUM": None, 
+                         "lyft_1024": os.path.join(script_path, "data_download/train")} # ZMH: kitti_depth originally not shown as an option here
+        splitfile_dict = {"kitti": "{}_files.txt",
+                         "kitti_odom": None, 
+                         "kitti_depth": "{}_files.txt", 
+                         "TUM": None, 
+                         "lyft_1024": "samp_1024_{}_files.txt"} # ZMH: kitti_depth originally not shown as an option here
+        self.width_dict = {"kitti": 640,
+                         "kitti_odom": None, 
+                         "kitti_depth": 640, 
+                         "TUM": None, 
+                         "lyft_1024": 512} # ZMH: kitti_depth originally not shown as an option here
+        self.height_dict = {"kitti": 192,
+                         "kitti_odom": None, 
+                         "kitti_depth": 192, 
+                         "TUM": None, 
+                         "lyft_1024": 224} # ZMH: kitti_depth originally not shown as an option here # change lyft height from 256 to 192 to 224
+        self.full_res_shape = {}
+        n_datasets_train = len(self.opt.dataset)
+        n_datasets_val = len(self.opt.dataset_val)
+        assert len(self.opt.dataset) == len(self.opt.split_train)
+        assert len(self.opt.dataset_val) == len(self.opt.split_val)
+        
+        dataset_train = {}
+        dataset_val = {}
+        ## construct dataset_train
+        for i, ds_name in enumerate(self.opt.dataset):
+            fpath = os.path.join(script_path, "splits", self.opt.split_train[i], splitfile_dict[ds_name])
+            train_filenames = readlines(fpath.format("train"))
+            if "kitti" in ds_name:
+                img_ext = '.png' if self.opt.png else '.jpg'
+            elif "lyft" in ds_name:
+                img_ext = '.png'
+            else:
+                raise ValueError("This dataset not implemented yet.")
 
-        fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
+            dataset_train[ds_name] = datasets_dict[ds_name](
+                datapath_dict[ds_name], train_filenames, self.height_dict[ds_name], self.width_dict[ds_name], 
+                self.opt.frame_ids, 4, is_train=True, img_ext=img_ext
+            )
+            self.full_res_shape[ds_name] = dataset_train[ds_name].full_res_shape
 
-        train_filenames = readlines(fpath.format("train"))
-        val_filenames = readlines(fpath.format("val"))
-        img_ext = '.png' if self.opt.png else '.jpg'
-
-        num_train_samples = len(train_filenames)
+            # checking height and width are multiples of 32
+            assert self.height_dict[ds_name] % 32 == 0, "'height' must be a multiple of 32"
+            assert self.width_dict[ds_name] % 32 == 0, "'width' must be a multiple of 32"
+        
+        num_train_samples = sum( [len(train_set) for train_set in dataset_train.values()] )
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
 
-        train_dataset = self.dataset(
-            self.opt.data_path, train_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, is_train=True, img_ext=img_ext)
-        # self.train_loader = DataLoader(
-        #     train_dataset, self.opt.batch_size, True,
-        #     num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
-        self.train_loader = DataLoader(
-            train_dataset, self.opt.batch_size, True,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
+        ## constuct dataset_val
+        for i, ds_name in enumerate(self.opt.dataset_val):
+            fpath = os.path.join(script_path, "splits", self.opt.split_val[i], splitfile_dict[ds_name])
+            val_filenames = readlines(fpath.format("val"))
+            if "kitti" in ds_name:
+                img_ext = '.png' if self.opt.png else '.jpg'
+            elif "lyft" in ds_name:
+                img_ext = '.png'
+            else:
+                raise ValueError("This dataset not implemented yet.")
 
-        val_dataset = self.dataset_val(
-            self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, is_train=False, img_ext=img_ext)
-        # self.val_loader = DataLoader(
-        #     val_dataset, self.opt.batch_size, True,
-        #     num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
-        self.val_loader = DataLoader(
-            val_dataset, self.opt.batch_size, True,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
+            dataset_val[ds_name] = datasets_dict[ds_name](
+                datapath_dict[ds_name], val_filenames, self.height_dict[ds_name], self.width_dict[ds_name], 
+                self.opt.frame_ids, 4, is_train=False, img_ext=img_ext
+            )
+            self.full_res_shape[ds_name] = dataset_val[ds_name].full_res_shape
+
+            # checking height and width are multiples of 32
+            assert self.height_dict[ds_name] % 32 == 0, "'height' must be a multiple of 32"
+            assert self.width_dict[ds_name] % 32 == 0, "'width' must be a multiple of 32"
+        
+        ### from dataset to dataloader
+        if len(self.opt.dataset) == 1:
+            self.train_loader = DataLoader(
+                dataset_train[self.opt.dataset[0]], self.opt.batch_size, True,
+                num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
+            
+            self.val_loader = DataLoader(
+                dataset_val[self.opt.dataset_val[0]], self.opt.batch_size, True,
+                num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
+            
+            print("Using train split:")
+            for split in self.opt.split_train:
+                print(split, end=" ")
+            print("\nfor dataset:")
+            for name in self.opt.dataset:
+                print(name, end=" ")
+            print("\nThere are {:d} training items and {:d} validation items\n".format(
+                len(dataset_train[self.opt.dataset[0]]), len(dataset_val[self.opt.dataset_val[0]])))
+        else:
+            concat_train_set = ConcatDataset( list(dataset_train.values()) )
+            concat_val_set = ConcatDataset( list(dataset_val.values()) )
+
+            concat_sampler_train = SamplerForConcat(concat_train_set, self.opt.batch_size, drop_last=True)
+            concat_sampler_val = SamplerForConcat(concat_val_set, self.opt.batch_size, drop_last=True)
+
+            self.train_loader = DataLoader(
+                concat_train_set, batch_sampler=concat_sampler_train, 
+                num_workers=self.opt.num_workers, pin_memory=True, collate_fn=my_collate_fn)
+            
+            self.val_loader = DataLoader(
+                concat_val_set, batch_sampler=concat_sampler_val, 
+                num_workers=self.opt.num_workers, pin_memory=True, collate_fn=my_collate_fn)
+        
+            print("Using val split:")
+            for split in self.opt.split_val:
+                print(split, end=" ")
+            print("\nfor dataset:")
+            for name in self.opt.dataset_val:
+                print(name, end=" ")
+            print("\nThere are {:d} training items and {:d} validation items\n".format(
+                len(concat_train_set), len(concat_val_set)))
+
         self.val_iter = iter(self.val_loader)
         self.val_count = 0
 
@@ -219,6 +303,7 @@ class Trainer:
             self.path_opt = None
             self.path_pcd = None
             self.writers = None
+            self.nkern_path = None
         else:
             self.path_model = os.path.join(self.log_path, "models" + "_"+self.ctime)
             self.path_opt = self.path_model
@@ -227,6 +312,9 @@ class Trainer:
             for mode in ["train", "val", "val_set"]:
                 # self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
                 self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode + '_' + self.ctime))
+            self.nkern_path = os.path.join(self.log_path, "nkerns_"+self.ctime)
+            if not os.path.exists(self.nkern_path):
+                os.makedirs(self.nkern_path)
 
         if not self.opt.no_ssim:
             self.ssim = SSIM()
@@ -235,21 +323,20 @@ class Trainer:
         self.backproject_depth = {}
         self.project_3d = {}
         for scale in self.opt.scales:
-            h = self.opt.height // (2 ** scale)
-            w = self.opt.width // (2 ** scale)
+            self.backproject_depth[scale] = {}
+            self.project_3d[scale] = {}
+            for datasrc in self.opt.dataset+self.opt.dataset_val:
+                h = self.height_dict[datasrc] // (2 ** scale)
+                w = self.width_dict[datasrc] // (2 ** scale)
 
-            self.backproject_depth[scale] = BackprojectDepth(self.opt.batch_size, h, w)
-            self.backproject_depth[scale].to(self.device)
+                self.backproject_depth[scale][datasrc] = BackprojectDepth(self.opt.batch_size, h, w)
+                self.backproject_depth[scale][datasrc].to(self.device)
 
-            self.project_3d[scale] = Project3D(self.opt.batch_size, h, w)
-            self.project_3d[scale].to(self.device)
+                self.project_3d[scale][datasrc] = Project3D(self.opt.batch_size, h, w)
+                self.project_3d[scale][datasrc].to(self.device)
 
         self.depth_metric_names = [
             "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
-
-        print("Using split:\n  ", self.opt.split)
-        print("There are {:d} training items and {:d} validation items\n".format(
-            len(train_dataset), len(val_dataset)))
 
         self.save_opts()
 
@@ -472,6 +559,14 @@ class Trainer:
                 inputs[key] = ipt.to(self.device)
             else:
                 inputs[key] = [ipt_i.to(self.device) for ipt_i in ipt]
+        
+        ### check cur_datasrc for cross-dataset training
+        if inputs[("color_aug", 0, 0)].shape[-1] == self.width_dict["kitti"]:
+            self.cur_datasrc = "kitti"
+        elif inputs[("color_aug", 0, 0)].shape[-1] == self.width_dict["lyft_1024"]:
+            self.cur_datasrc = "lyft_1024"
+        else:
+            raise ValueError("Image with width {} not recognized".format(inputs[("color_aug", 0, 0)].shape[-1]))
 
         if self.opt.pose_model_type == "shared":
             # If we are using a shared encoder for both depth and pose (as advocated
@@ -680,7 +775,7 @@ class Trainer:
             source_scale = scale
         else:
             disp = F.interpolate(
-                disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
+                disp, [self.height_dict[self.cur_datasrc], self.width_dict[self.cur_datasrc]], mode="bilinear", align_corners=False)
             source_scale = 0
 
         _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
@@ -691,7 +786,7 @@ class Trainer:
         ### ZMH: gt depth -> point cloud gt (for other frames, transform the point cloud to host frame)
         ### ZMH: Due to that ground truth depth image is not valid at every pixel, the length of pointcloud in the mini-batch is not consistent. 
         ### ZMH: Therefore samples are processed one by one in the mini-batch.
-        cam_points_gt, masks = self.backproject_depth[scale](
+        cam_points_gt, masks = self.backproject_depth[scale][self.cur_datasrc](
             inputs[("depth_gt_scale", frame_id, scale)], inputs[("inv_K", scale)], separate=True)
         if T_inv is None:
             outputs[("xyz_gt", frame_id, scale)] = cam_points_gt
@@ -717,7 +812,7 @@ class Trainer:
 
         ### ZMH: disparity prediction -> depth prediction -> point cloud prediction (for other frames, transform the point cloud to host frame)
         depth_curscale, _ = self.from_disp_to_depth(disp, scale, force_multiscale=True)
-        cam_points_curscale = self.backproject_depth[scale](
+        cam_points_curscale = self.backproject_depth[scale][self.cur_datasrc](
             depth_curscale, inputs[("inv_K", scale)])
         if T_inv is None:
             xyz_is = {}
@@ -746,7 +841,7 @@ class Trainer:
     def gen_pcl_wrap_host(self, inputs, outputs, scale):
 
         ### 1. gt from lidar
-        cam_points_gt, masks = self.backproject_depth[scale](
+        cam_points_gt, masks = self.backproject_depth[scale][self.cur_datasrc](
             inputs[("depth_gt_scale", 0, scale)], inputs[("inv_K", scale)], separate=True)
         outputs[("xyz_gt", 0, scale)] = cam_points_gt
         rgb_gt = {}
@@ -761,7 +856,7 @@ class Trainer:
         masks = inputs[("depth_mask", 0, scale)]
         masks = [masks[i].view(-1) for i in range(masks.shape[0]) ]
 
-        cam_points_host = self.backproject_depth[scale](
+        cam_points_host = self.backproject_depth[scale][self.cur_datasrc](
             outputs[("depth_wrap", 0, scale)], inputs[("inv_K", scale)] )
         xyz_is = {}
         rgb_is = {}
@@ -779,7 +874,7 @@ class Trainer:
         own_id_coords = torch.cat((uv_wrap, 
                 ones_), dim=1) # B*3*N
         
-        cam_points_wrap = self.backproject_depth[scale](
+        cam_points_wrap = self.backproject_depth[scale][self.cur_datasrc](
             outputs[("depth_wrap", frame_id, scale)], inputs[("inv_K", scale)], own_pix_coords=own_id_coords )
         cam_points_other_in_host = torch.matmul(T_inv, cam_points_wrap)
         xyz_is = {}
@@ -791,7 +886,7 @@ class Trainer:
         outputs[("rgb_in_host", frame_id, scale)] = rgb_is
 
         ### 4. generate gt for adjacent frames
-        cam_points_gt, masks = self.backproject_depth[scale](
+        cam_points_gt, masks = self.backproject_depth[scale][self.cur_datasrc](
             inputs[("depth_gt_scale", frame_id, scale)], inputs[("inv_K", scale)], separate=True)
         # cam_points_gt_in_host = torch.matmul(T_inv, cam_points_gt)
         # outputs[("xyz_gt", frame_id, scale)] = cam_points_gt_in_host
@@ -869,7 +964,7 @@ class Trainer:
 
         for gt_flag in [True, False]:
             if gt_flag: 
-                cam_pts_grid = self.backproject_depth[scale](
+                cam_pts_grid = self.backproject_depth[scale][self.cur_datasrc](
                     inputs[("depth_gt_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
                 outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)] = cam_pts_grid[:,:3] # ZMH: B*3*H*W
                 if self.opt.mask_samp_as_lidar:
@@ -877,7 +972,7 @@ class Trainer:
                 else:
                     outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)] = inputs[("depth_mask_gt", frame_id, scale)]  # ZMH: B*1*H*W
             else:
-                cam_pts_grid = self.backproject_depth[scale](
+                cam_pts_grid = self.backproject_depth[scale][self.cur_datasrc](
                     outputs[("depth_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
                 outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)] = cam_pts_grid[:,:3]
                 if self.opt.mask_samp_as_lidar:
@@ -892,7 +987,7 @@ class Trainer:
 
             grid_info_dict = {}
             grid_info_dict["xyz"] = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
-            grid_info_dict["uv"] = self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1) # ZMH: B*2*H*W
+            grid_info_dict["uv"] = self.backproject_depth[scale][self.cur_datasrc].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1) # ZMH: B*2*H*W
             grid_info_dict["hsv"] = outputs[("grid_hsv", frame_id, scale, frame_id, gt_flag)]
             if self.opt.use_panoptic:
                 grid_info_dict["panop"] = outputs[("grid_panop", frame_id, scale, frame_id, gt_flag)]
@@ -1108,15 +1203,17 @@ class Trainer:
         ## TODO: How to deal with points with no normal?
         uvb_split = flat_uvb.to(dtype=torch.long).squeeze(0).transpose(0,1).split(1,dim=1) # a tuple of 3 elements of tensor N*1, only long/byte/bool tensors can be used as indices
 
-        C_info = flat_info.shape[1]
-        grid_info = torch.zeros((grid_xyz_shape[0], C_info, grid_xyz_shape[2], grid_xyz_shape[3]), dtype=flat_info.dtype, device=flat_info.device) # B*C*H*W
-        flat_info_t = flat_info.squeeze(0).transpose(0,1).unsqueeze(1) # N*1*C
-        grid_info[uvb_split[2], :, uvb_split[1], uvb_split[0]] = flat_info_t
+        grid_info = grid_from_concat_flat_func(uvb_split, flat_info, grid_xyz_shape)
+        # C_info = flat_info.shape[1]
+        # grid_info = torch.zeros((grid_xyz_shape[0], C_info, grid_xyz_shape[2], grid_xyz_shape[3]), dtype=flat_info.dtype, device=flat_info.device) # B*C*H*W
+        # flat_info_t = flat_info.squeeze(0).transpose(0,1).unsqueeze(1) # N*1*C
+        # grid_info[uvb_split[2], :, uvb_split[1], uvb_split[0]] = flat_info_t
 
-        C_res = flat_nres.shape[1]
-        grid_nres = torch.zeros((grid_xyz_shape[0], C_res, grid_xyz_shape[2], grid_xyz_shape[3]), dtype=flat_info.dtype, device=flat_info.device) # B*1*H*W
-        flat_nres_t = flat_nres.squeeze(0).transpose(0,1).unsqueeze(1) # N*1*1
-        grid_nres[uvb_split[2], :, uvb_split[1], uvb_split[0]] = flat_nres_t
+        grid_nres = grid_from_concat_flat_func(uvb_split, flat_nres, grid_xyz_shape)
+        # C_res = flat_nres.shape[1]
+        # grid_nres = torch.zeros((grid_xyz_shape[0], C_res, grid_xyz_shape[2], grid_xyz_shape[3]), dtype=flat_info.dtype, device=flat_info.device) # B*1*H*W
+        # flat_nres_t = flat_nres.squeeze(0).transpose(0,1).unsqueeze(1) # N*1*1
+        # grid_nres[uvb_split[2], :, uvb_split[1], uvb_split[0]] = flat_nres_t
 
         return grid_info, grid_nres
 
@@ -1323,7 +1420,7 @@ class Trainer:
         return inp_dict, dist_dict, cos_dict
                 
 
-    def get_innerp_from_grid_flat(self, outputs, n_pts_dict):
+    def get_innerp_from_grid_flat(self, inputs, outputs, n_pts_dict):
         
         if self.opt.random_ell:
             self.feats_ell["xyz"] = np.abs(self.ell_base* np.random.normal()) + self.opt.ell_min
@@ -1332,6 +1429,15 @@ class Trainer:
 
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
         
+        ### save imgs
+        if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 :
+            filename = os.path.join(self.nkern_path, "{}".format(self.step) )
+            save_tensor_to_img(inputs[("color", 0, 0)], filename, "rgb")
+            save_tensor_to_img(outputs[("disp", 0)], filename, "dep")
+            save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,False)], filename, "nml_pred")
+            save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,True)], filename, "nml_gt")
+
+
         # neighbor_range = int(2)
         neighbor_range = self.opt.neighbor_range
         inp_feat_dict = {}
@@ -1374,8 +1480,17 @@ class Trainer:
                         grid_normal = outputs[("grid_normal", grid_idx, scale, grid_idx, grid_gt)].contiguous()
                         flat_nres = outputs[("flat_nres", flat_idx, scale, grid_idx, flat_gt)].contiguous()
                         grid_nres = outputs[("grid_nres", grid_idx, scale, grid_idx, grid_gt)].contiguous()
-                        inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
-                            flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist)
+                        # inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
+                        #     flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist)
+                        
+                        if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and flat_idx == grid_idx and flat_idx == 0 and scale == 0:
+                            filename = os.path.join(self.nkern_path, "{}_{}_{}_{}_{}".format(self.step, flat_idx, scale, grid_idx, flat_gt ) )
+                            filename_nkern = "{}_nkern".format(filename)
+                            inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
+                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist, True, filename_nkern)
+                        else:
+                            inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
+                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist, False, None)
                         
                         try:
                             assert not (inp_feat_dict[combo][scale]==0).all(), "{}{} is all zero".format(combo, scale)
@@ -1500,10 +1615,10 @@ class Trainer:
         return
 
     def get_xyz_dense(self, frame_id, scale, inputs, outputs):
-        cam_points_gt = self.backproject_depth[scale](
+        cam_points_gt = self.backproject_depth[scale][self.cur_datasrc](
             inputs[("depth_gt_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
 
-        cam_points_pred = self.backproject_depth[scale](
+        cam_points_pred = self.backproject_depth[scale][self.cur_datasrc](
             outputs[("depth_scale", frame_id, scale)], inputs[("inv_K", scale)], as_img=True)
 
         outputs[("xyz1_dense_gt", frame_id, scale)] = cam_points_gt
@@ -1749,7 +1864,7 @@ class Trainer:
             # depth = outputs[("depth", 0, scale)]
 
 
-            cam_points = self.backproject_depth[source_scale](
+            cam_points = self.backproject_depth[source_scale][self.cur_datasrc](
                 depth, inputs[("inv_K", source_scale)])
 
             if self.opt.cvo_loss:
@@ -1757,7 +1872,7 @@ class Trainer:
                 depth_curscale, _ = self.from_disp_to_depth(disp, scale, force_multiscale=True)
                 outputs[("depth_scale", 0, scale)] = depth_curscale
                 outputs[("depth_wrap", 0, scale)] = depth_curscale
-                cam_points_curscale = self.backproject_depth[scale](
+                cam_points_curscale = self.backproject_depth[scale][self.cur_datasrc](
                     depth_curscale, inputs[("inv_K", scale)])
                 
                 if self.opt.cvo_loss_dense:
@@ -1802,7 +1917,7 @@ class Trainer:
 
                 ### ZMH: px = T_x0 *p0
                 ### ZMH: therefore the T is the pose of host relative to frame x
-                pix_coords = self.project_3d[source_scale](
+                pix_coords = self.project_3d[source_scale][self.cur_datasrc](
                     cam_points, inputs[("K", source_scale)], T)
 
                 outputs[("sample", frame_id, scale)] = pix_coords
@@ -1834,7 +1949,7 @@ class Trainer:
                             self.get_grid_flat(frame_id, scale, inputs, outputs)
                     else:
                         ## ZMH: sample in adjacent frames
-                        pix_coords_curscale = self.project_3d[scale](
+                        pix_coords_curscale = self.project_3d[scale][self.cur_datasrc](
                             cam_points_curscale, inputs[("K", scale)], T)
                         outputs[("sample_wrap", frame_id, scale)] = pix_coords_curscale
 
@@ -1850,7 +1965,7 @@ class Trainer:
                                 padding_mode="border")
 
                             outputs[("uv_wrap", frame_id, scale)] = F.grid_sample(
-                                self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
+                                self.backproject_depth[scale][self.cur_datasrc].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
                                 outputs[("sample_wrap", frame_id, scale)],
                                 padding_mode="border")          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
                         else:
@@ -1865,7 +1980,7 @@ class Trainer:
                                 padding_mode="border", align_corners=True)
 
                             outputs[("uv_wrap", frame_id, scale)] = F.grid_sample(
-                                self.backproject_depth[scale].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
+                                self.backproject_depth[scale][self.cur_datasrc].id_coords.unsqueeze(0).expand(self.opt.batch_size, -1, -1, -1),
                                 outputs[("sample_wrap", frame_id, scale)],
                                 padding_mode="border", align_corners=True)          # the first argument: B*2*H*W, 2nd arg: B*H*W*2, output: B*2*H*W
                         
@@ -2115,7 +2230,7 @@ class Trainer:
                 if self.step % 4000 == 0: ## ZMH: comment this line for memory leak debug! 
                     self.save_pcd(outputs, n_pts_dict)
 
-                innerps, dists, coss = self.get_innerp_from_grid_flat(outputs, n_pts_dict)
+                innerps, dists, coss = self.get_innerp_from_grid_flat(inputs, outputs, n_pts_dict)
                 # innerps, dists, coss = self.get_innerp_from_grid_flat_dummy(outputs) ## ZMH: for memory leak debug 
                 self.reg_cvo_to_loss(losses, innerps, dists, coss)
                 # self.reg_cvo_to_loss_dummy(losses, innerps, dists, coss)  ## ZMH: for memory leak debug 
@@ -2327,7 +2442,7 @@ class Trainer:
                 mask = outputs["predictive_mask"]["disp", scale]
                 if not self.opt.v1_multiscale:
                     mask = F.interpolate(
-                        mask, [self.opt.height, self.opt.width],
+                        mask, [self.height_dict[self.cur_datasrc], self.width_dict[self.cur_datasrc]],
                         mode="bilinear", align_corners=False)
 
                 reprojection_losses *= mask
@@ -2478,12 +2593,17 @@ class Trainer:
         """
         depth_pred = outputs[("depth", 0, 0)]
 
-        if "TUM" not in self.opt.dataset:
-            depth_pred = torch.clamp(F.interpolate(
-                depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
+        if "kitti" in self.cur_datasrc:     ## TODO: make this automatic
+            full_shape = self.full_res_shape["kitti"][::-1]      ## full_shape is [375,1242]
+        elif "lyft" in self.cur_datasrc:
+            full_shape = self.full_res_shape["lyft_1024"][::-1]      ## full_shape is [1024,1224]
+        elif "TUM" in self.cur_datasrc:
+            full_shape = self.full_res_shape["TUM"][::-1]      ## full_shape is [480,640]
         else:
-            depth_pred = torch.clamp(F.interpolate(
-                depth_pred, [480, 640], mode="bilinear", align_corners=False), 1e-3, 80)
+            raise ValueError("cur_datasrc {} not recognized.".format(self.cur_datasrc))
+
+        depth_pred = torch.clamp(F.interpolate(
+            depth_pred, full_shape, mode="bilinear", align_corners=False), 1e-3, 80)
 
         depth_pred = depth_pred.detach()
 
@@ -2491,7 +2611,8 @@ class Trainer:
         mask = depth_gt > 0
 
         # garg/eigen crop
-        if "TUM" not in self.opt.dataset:
+        # if "TUM" not in self.opt.dataset:
+        if "kitti" in self.cur_datasrc:     ## TODO: maybe just kitti_raw?, kitti_depth does not need this. See evaluate_depth.py
             crop_mask = torch.zeros_like(mask)
             crop_mask[:, :, 153:371, 44:1197] = 1
             mask = mask * crop_mask
@@ -2625,8 +2746,8 @@ class Trainer:
             to_save = model.state_dict()
             if model_name == 'encoder':
                 # save the sizes - these are needed at prediction time
-                to_save['height'] = self.opt.height
-                to_save['width'] = self.opt.width
+                # to_save['height'] = self.opt.height
+                # to_save['width'] = self.opt.width ## comment because self.opt.width / height is disabled in options.py
                 to_save['use_stereo'] = self.opt.use_stereo
             torch.save(to_save, save_path)
 

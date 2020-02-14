@@ -116,13 +116,19 @@ class LyftDataset(MonoDataset):
     def __init__(self, *args, **kwargs):
         super(LyftDataset, self).__init__(*args, **kwargs)
 
-        if self.width == 306 and self.height == 256:
+        if self.width == 512 and self.height == 224: #256: #self.width == 512 and self.height == 416: (not cropped)
             self.full_res_shape = (1224, 1024)
-        elif self.width == 480 and self.height == 270:
+            self.crop_rows = (244, 244) # (365, 200) # (212, 200)
+            self.crop_cols = (0, 0)
+        elif self.width == 640 and self.height == 352:
             self.full_res_shape = (1920, 1080)
+            self.crop_rows = (0, 0)
+            self.crop_cols = (0, 0) ## TODO: implement cropping here
         else:
             raise ValueError("width {}, height {} not recognized.".format(self.width, self.height))
         self.side_map = {"2": 2, "3": 3, "l": 2, "r": 3}
+
+        self.full_res_shape = (self.full_res_shape[0]-self.crop_cols[0]-self.crop_cols[1], self.full_res_shape[1]-self.crop_rows[0]-self.crop_rows[1] )
 
     def check_depth(self):
         line = self.filenames[0].split()
@@ -132,12 +138,16 @@ class LyftDataset(MonoDataset):
         velo_filename = os.path.join(
             self.data_path,
             scene_name,
-            "velodyne_points/{:010d}.bin".format(int(frame_index)))
+            "velodyne/{:010d}.bin".format(int(frame_index)))
 
         return os.path.isfile(velo_filename)
     
     def get_color(self, folder, frame_index, side, do_flip):
         color = self.loader(self.get_image_path(folder, frame_index, side))
+
+        ##(left, upper, right, lower) cropping https://pillow.readthedocs.io/en/stable/reference/Image.html#PIL.Image.Image.crop 
+        color = color.crop((self.crop_cols[0], self.crop_rows[0], color.size[0]-self.crop_cols[1], color.size[1]-self.crop_rows[1]))
+        # print(color.size)
 
         if do_flip:
             color = color.transpose(pil.FLIP_LEFT_RIGHT)
@@ -147,14 +157,16 @@ class LyftDataset(MonoDataset):
     def get_image_path(self, folder, frame_index, side):
         f_str = "{:010d}{}".format(frame_index, self.img_ext)
         image_path = os.path.join(
-            self.data_path, folder, "image_0{}".format(self.side_map[side]), f_str)
+            self.data_path, folder, "image_{}".format(self.side_map[side]), f_str)
         return image_path
 
     def get_depth(self, folder, frame_index, side, do_flip):
+        """Cropping will affect depth_gt and P_rect_norm (normalized intrinsic matrix)
+        """
         velo_filename = os.path.join(
             self.data_path,
             folder,
-            "velodyne_points/{:010d}.bin".format(int(frame_index)))
+            "velodyne/{:010d}.bin".format(int(frame_index)))
 
         calib_filename = os.path.join(
             self.data_path,
@@ -162,6 +174,10 @@ class LyftDataset(MonoDataset):
             "calib/{:010d}.txt".format(int(frame_index)))
 
         velo_rect, cam_intr = generate_depth_map_lyft(calib_filename, velo_filename, self.side_map[side])
+
+        ### handle cropping
+        cam_intr[0,2] -= self.crop_cols[0]
+        cam_intr[1,2] -= self.crop_rows[0]
 
         P_rect_norm = np.identity(4)
         P_rect_norm[0,:] = cam_intr[0,:] / float(self.full_res_shape[0])

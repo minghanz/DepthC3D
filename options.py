@@ -17,10 +17,10 @@ class MonodepthOptions:
         self.parser = argparse.ArgumentParser(description="Monodepthv2 options")
 
         # PATHS
-        self.parser.add_argument("--data_path",
-                                 type=str,
-                                 help="path to the training data",
-                                 default=os.path.join(file_dir, "kitti_data"))
+     #    self.parser.add_argument("--data_path",
+     #                             type=str,
+     #                             help="path to the training data",
+     #                             default=os.path.join(file_dir, "kitti_data"))     ## comment this because written in trainer.py for easier cross-dataset training
         self.parser.add_argument("--log_dir",
                                  type=str,
                                  help="log directory",
@@ -32,11 +32,18 @@ class MonodepthOptions:
                                  type=str,
                                  help="the name of the folder to save the model in",
                                  default="mdp")
-        self.parser.add_argument("--split",
+        self.parser.add_argument("--split_train",
                                  type=str,
+                                 nargs="+", 
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val", "lyft"],
                                  default="eigen_zhou")
+        self.parser.add_argument("--split_val",
+                                 type=str,
+                                 nargs="+", 
+                                 help="which validation split to use",
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val", "lyft"],
+                                 default="eigen_zhou")      ## This is added for easier cross-dataset training
         self.parser.add_argument("--num_layers",
                                  type=int,
                                  help="number of resnet layers",
@@ -44,25 +51,27 @@ class MonodepthOptions:
                                  choices=[18, 34, 50, 101, 152])
         self.parser.add_argument("--dataset",
                                  type=str,
+                                 nargs="+", 
                                  help="dataset to train on",
                                  default="kitti",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM"])
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM", "lyft_1024"])
         self.parser.add_argument("--dataset_val",
                                  type=str,
+                                 nargs="+", 
                                  help="dataset to evaluate on",
                                  default="kitti",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM"]) # ZMH: this option added by me
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM", "lyft_1024"]) # ZMH: this option added by me
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")
-        self.parser.add_argument("--height",
-                                 type=int,
-                                 help="input image height",
-                                 default=192)
-        self.parser.add_argument("--width",
-                                 type=int,
-                                 help="input image width",
-                                 default=640)
+     #    self.parser.add_argument("--height",
+     #                             type=int,
+     #                             help="input image height",
+     #                             default=192)
+     #    self.parser.add_argument("--width",
+     #                             type=int,
+     #                             help="input image width",
+     #                             default=640)   ## comment this because written in trainer.py for easier cross-dataset training
         self.parser.add_argument("--disparity_smoothness",
                                  type=float,
                                  help="disparity smoothness weight",
@@ -229,6 +238,17 @@ class MonodepthOptions:
                                  type=float, 
                                  help="the minimal ell used in geometric kernel",
                                  default=0.05)
+     #    self.parser.add_argument("--cross_set",
+     #                             help="if set, use lyft_1024 in training",
+     #                             action="store_true")
+        self.parser.add_argument("--save_pic_intv",
+                                 type=int,
+                                 help="interval between two image-saving iteration. Disabled if set to 0.",
+                                 default=0)
+        self.parser.add_argument("--save_pcd_intv",
+                                 type=int,
+                                 help="interval between two image-saving iteration. Disabled if set to 0.",
+                                 default=4000)
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",

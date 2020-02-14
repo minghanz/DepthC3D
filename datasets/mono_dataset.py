@@ -93,6 +93,8 @@ class MonoDataset(data.Dataset):
                                                interpolation=self.interp)
 
         self.load_depth = self.check_depth()
+        if not self.load_depth:
+            raise ValueError("Depth not available!")    ## add by Minghan. Make sure depth is always available
 
         # ### for dilation operation to generate mask for valid pixels
         self.dilate_struct = {}

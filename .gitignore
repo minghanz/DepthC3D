@@ -7,3 +7,4 @@ kitti_data
 models
 tmp
 *.pcd
+data_download

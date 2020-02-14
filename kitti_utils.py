@@ -239,12 +239,50 @@ def generate_depth_map_original(calib_dir, velo_filename, cam=2, vel_depth=False
 
 def generate_depth_map_lyft(calib_file, velo_file, cam):
     calib_info = read_calib_file(calib_file)
-    T_cam_velo = calib_info["Tr_velo_to_cam"]
-    cam_intr = calib_info["P2"]
+    T_cam_velo = calib_info["Tr_velo_to_cam"].reshape(3,4)
+    cam_intr = calib_info["P2"].reshape(3,4)
 
+    T_cam_velo_4by4 = np.identity(4)
+    T_cam_velo_4by4[:3, :] = T_cam_velo
     velo = load_velodyne_points(velo_file)
     velo = velo[velo[:, 0] >= 0, :]
 
-    velo_rect = np.dot(T_cam_velo, velo.T).T
+    velo_rect = np.dot(T_cam_velo_4by4, velo.T).T
 
     return velo_rect, cam_intr
+
+def normalize_width(original_width, mode):
+    # kitti_original_width = 1242
+    # kitti_focal_length = 721.5377
+    kitti_focal_width_ratio = 0.58 # kitti_focal_length/kitti_original_width
+    kitti_target_width = 640
+
+    kitti_target_focal_length = kitti_target_width * kitti_focal_width_ratio
+
+    if mode == "lyft_1024":
+        focal_length = 881.4388
+        width = 1224
+    elif mode == "lyft_1080":
+        focal_length = 1104.3537 ##TODO: this is calculated from FOV, not from calibration file
+        width = 1920
+    else:
+        raise ValueError("Mode {} not supported.".format(mode))
+
+    focal_width_ratio = focal_length / width
+
+    target_width = int(kitti_target_focal_length / focal_width_ratio) ## 515 for lyft_1024, 645 for lyft_1080 ## round to 512*416 and 640*352 (slightly changing the ratio to match 32x)
+
+    return target_width
+### Things needed for deciding target width and height
+### 1a. calculate the ideal width so that the the underlying focal length is the same as that of kitti
+### 1b. find the nearest 32x to this idea width as the target width
+### 2a. calculate the target height so that the aspect ratio does not change
+### 2b. find the nearest 32x to this idea height as the target height
+### 3a. if needed, crop the original height so that the target height is a smaller 32x. 
+### 3b. crop in a way that the location of optical center relative to the image 
+
+### Why we want to keep optical center at the same place in the image? 
+### Because pitch angle is relavent in distance estimation, while pitch angle can be inferenced by the displacement between optical center and vanishing point. 
+### However, there is no way a network can infer optical center. 
+### Therefore we need to keep optical center fixed so that it is possible to let the network infer pitch angle by observing the vanishing point location. 
+### On the other hand, height is also relevant in distance estimation, but height can be inferred by the appearance of road and lane in theory, if the width of road/lane are roughly constant. 
