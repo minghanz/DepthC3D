@@ -102,8 +102,8 @@ class PtSampleInGridWithNormal(Function):
         dy = dy.contiguous()
         dx1, dx2, dn1, dn2, dr1, dr2 = cvo_dense_with_normal.backward( \
             dy, pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, ctx.neighbor_range, ctx.ell, ctx.mag_max, ctx.mag_min, ctx.ignore_ib, ctx.norm_in_dist, ctx.ell_basedist)
-        return None, dx1, dx2, None, dn1, dn2, dr1, dr2, None, None, None, None, None, None, None, None, None
-        # return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None, None, None, None
+        # return None, dx1, dx2, None, dn1, dn2, dr1, dr2, None, None, None, None, None, None, None, None, None
+        return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None, None, None, None
         
 class PtSampleInGridCalcNormal(Function):
     @staticmethod
@@ -183,6 +183,112 @@ def calc_normal(pts, grid_source, grid_valid, neighbor_range, ignore_ib, min_dis
     ## weighted_normal is unit length normal vectors 1*C*N; res_final in [0,1], 1*1*N
     ## some vectors in weighted_normal could be zero if no neighboring pixels are found
     return weighted_normal, res_final
+
+def res_normal_dense(xyz, normal, K):
+    """
+    xyz: B*C*H*W, C=3
+    normal: B*C*H*W (normalized), C=3
+    K: cam intr
+    """
+    batch_size = xyz.shape[0]
+    channel = xyz.shape[1]
+    xyz_patches = F.unfold(xyz, kernel_size=3, padding=1).reshape(batch_size, channel, 9, -1)    # B*(C*9)*(H*W) -> B*C*9*(H*W)
+    xyz_patch_proj = (xyz_patches * normal.reshape(batch_size, channel, 1, -1 )).sum(dim=1)  # B*9*(H*W)
+    xyz_patch_proj_res = xyz_patch_proj[:, [0,1,2,3,5,6,7,8], :] - xyz_patch_proj[:,[4], :] # B*8*(H*W)
+    xyz_patch_diff = ( xyz_patches[:, :, [0,1,2,3,5,6,7,8], :] - xyz_patches[:, :, [4], :] ).norm(dim=1)  # B*8*(H*W)
+    
+    xyz_patch_res_sin = ( xyz_patch_proj_res/ (xyz_patch_diff+1e-8) ).abs().mean(dim=1, keepdim=True).reshape(batch_size, 1, xyz.shape[2], xyz.shape[3]) # B*1*H*W between 0~1
+
+    return xyz_patch_res_sin
+
+class NormalFromDepthDense(torch.nn.Module):
+    def __init__(self):
+        super(NormalFromDepthGrad, self).__init__()
+        sobel_grad = SobelGrad()
+
+    def forward(self, depth, K):
+        grad_x, grad_y = sobel_grad(depth)
+        normal = normal_from_grad(grad_x, grad_y, depth, K)
+        # tan_x = tan_from_grad(grad_x, depth, K)
+        # tan_y = tan_from_grad(grad_x, depth, K)
+        # normal = normal_from_tan(tan_x, tan_y)
+        return normal
+
+class SobelGrad(torch.nn.Module):
+    def __init__(self):
+        super(SobelGrad, self).__init__()
+        filter_shape = (1, 1, 3, 3) # out_c, in_c/group, kH, kW
+        kern_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32).reshape(filter_shape) / 8.0 # normalize so that the value is a real gradient delta(d)/delta(x)
+        kern_y = self.window_x.transpose(2,3)
+        self.register_buffer("kern_x", kern_x)
+        self.register_buffer("kern_y", kern_y)
+        self.pad_layer = torch.nn.ReflectionPad2d(1) # (left,right,top,bottom) or an int
+        ## use a dedicated padding layer because the padding in F.conv2d only pads zeros.
+
+    def forward(self, img):
+        """expect the img channel to be 1 if used in NormalFromDepthGrad, 
+        Otherwise the return channel number is the same as input
+        """
+        img_pad = self.pad_layer(img)
+        grad_x = torch.zeros_like(img)
+        grad_y = torch.zeros_like(img)
+        for ic in img.shape[1]:
+            grad_x[:,ic:ic+1,:,:] = F.conv2d(img_pad[:,ic:ic+1,:,:], self.kern_x)
+            grad_y[:,ic:ic+1,:,:] = F.conv2d(img_pad[:,ic:ic+1,:,:], self.kern_y)
+        
+        return grad_x, grad_y
+            
+def tan_from_grad(grad, depth, K, mode):
+    """
+    grad: grad_x or grad_y, B*1*H*W
+    depth: B*1*H*W
+    K: cam intrinsic mat
+    mode: "x" or "y"
+    """
+    fx = K[0,0]
+    fy = K[1,1]
+    cx = K[0,2]
+    cy = K[1,2]
+    y_range = torch.arange(grad.shape[2], device=grad.device, dtype=grad.dtype) # height, y, v
+    x_range = torch.arange(grad.shape[3], device=grad.device, dtype=grad.dtype) # width, x, u
+    grid_y, grid_x = torch.meshgrid(y_range, x_range) ## [height * width]
+    
+    ## x_hat and y_hat
+    x_hat = (grid_x - cx) / fx  # [h*w]
+    y_hat = (grid_y - cy) / fy
+
+    if mode== "x":
+        tan_0 = x_hat * grad + depth / fx     #B*1*H*W
+        tan_1 = y_hat * grad
+        tan_2 = grad
+        tan = torch.stack( (tan_0, tan_1, tan_2), dim=1 ) # B*3*H*W
+    elif mode== "y":
+        tan_0 = x_hat * grad    #B*1*H*W
+        tan_1 = y_hat * grad + depth / fy
+        tan_2 = grad
+        tan = torch.stack( (tan_0, tan_1, tan_2), dim=1 ) # B*3*H*W
+    else:
+        raise ValueError("mode {} not recognized".format(mode))
+
+def normal_from_tan(tan_x, tan_y):
+    normal = torch.cross(tan_x, tan_y, dim=1) #B*3*H*W
+    return F.normalize(normal, p=2, dim=1)
+
+def normal_from_grad(grad_x, grad_y, depth, K):
+    y_range = torch.arange(grad_x.shape[2], device=grad_x.device, dtype=grad_x.dtype) # height, y, v
+    x_range = torch.arange(grad_x.shape[3], device=grad_x.device, dtype=grad_x.dtype) # width, x, u
+    grid_y, grid_x = torch.meshgrid(y_range, x_range) ## [height * width]
+
+    fx = K[0,0]
+    fy = K[1,1]
+    cx = K[0,2]
+    cy = K[1,2]
+
+    normal_0 = -fy * grad_x
+    normal_1 = -fx * grad_y
+    normal_2 = (grid_x - cx) * grad_x + (grid_y - cy) * grad_y + depth
+    normal = torch.stack([normal_0, normal_1, normal_2], dim=1)
+    return F.normalize(normal, p=2, dim=1)
 
 def grid_from_concat_flat_func(uvb_split, flat_info, grid_shape):
     """

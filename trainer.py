@@ -39,7 +39,7 @@ from wrap_to_panoptic import to_panoptic, PanopVis
 
 import threading
 
-from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal, calc_normal, recall_grad, grid_from_concat_flat_func, save_tensor_to_img
+from cvo_utils import PtSampleInGrid, PtSampleInGridAngle, PtSampleInGridWithNormal, calc_normal, recall_grad, grid_from_concat_flat_func, save_tensor_to_img, res_normal_dense, NormalFromDepthDense
 
 import torch
 torch.manual_seed(0)
@@ -341,6 +341,9 @@ class Trainer:
         self.save_opts()
 
         self.set_other_params_from_opt() # moved from get_innerp_from_grid_flat
+
+        if self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3:
+            normal_from_depth_v3 = NormalFromDepthDense()
 
     def set_other_params_from_opt(self):
         
@@ -998,6 +1001,16 @@ class Trainer:
                 grid_info_dict["normal"] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)]
                 grid_info_dict["nres"] = outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)]
 
+            #### calculate normal from dense image, using depth gradient, residual is similar to use_normal(_v1)
+            if self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3 and not gt_flag:
+                outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] = normal_from_depth_v3(outputs[("depth_scale", frame_id, scale)], inputs[("K", scale)])
+                outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)] = res_normal_dense(outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)], \
+                                                                                            outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)], inputs[("K", scale)])
+                outputs[("grid_normal_vis", frame_id, scale, frame_id, gt_flag)] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] * 0.5 + 0.5
+
+                grid_info_dict["normal"] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)]
+                grid_info_dict["nres"] = outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)]
+
             grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
             flat_info_dict = self.flat_from_grid(grid_valid, grid_info_dict)
             outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["xyz"]
@@ -1007,7 +1020,7 @@ class Trainer:
                 outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["panop"]
                 outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["seman"]  
 
-            if self.opt.use_normal:
+            if self.opt.use_normal or (self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3 and not gt_flag):
                 outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["normal"]  
                 outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["nres"] 
 
@@ -1056,7 +1069,7 @@ class Trainer:
                             outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)][ib]
                             outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)][ib]
 
-                        if self.opt.use_normal:
+                        if self.opt.use_normal or (self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3 and not gt_flag):
                             if frame_id == 0:
                                 Ri = Ti[:, :3, :3]
                             else:
@@ -1071,6 +1084,8 @@ class Trainer:
         for scale in self.opt.scales:
             for frame_id in self.opt.frame_ids:
                 for gt_flag in [True, False]:
+                    if not gt_flag and self.opt.use_normal_v3:
+                        continue
                     ## 1. flat_normal and flat_nres from concat flat_xyz (same frame)
                     self.normal_from_depth_v2(outputs, frame_id, scale, gt_flag)
 
@@ -1159,7 +1174,7 @@ class Trainer:
                 if xyz_grad is None:
                     xyz = outputs[("flat_xyz", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
                     color = hsv_to_rgb( outputs[("flat_hsv", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ], flat=True )
-                    if self.opt.use_normal or self.opt.use_normal_v2:
+                    if self.opt.use_normal or self.opt.use_normal_v2 or self.opt.use_normal_v3:
                         normal = outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)][:, :, n_pts[ib]:n_pts[ib+1] ]
                         visualize_pcl(xyz, rgb=color, normal=normal, filename=filename, single_batch=True)
                     else:
@@ -1475,7 +1490,7 @@ class Trainer:
                     grid_info = outputs[("grid_"+feat, grid_idx, scale, grid_idx, grid_gt)]
                     if feat == "seman":
                         inp_feat_dict[combo][scale] = PtSampleInGridAngle.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), neighbor_range)
-                    elif feat == "xyz" and (self.opt.use_normal or self.opt.use_normal_v2):
+                    elif feat == "xyz" and (self.opt.use_normal or self.opt.use_normal_v2 or self.opt.use_normal_v3):
                         flat_normal = outputs[("flat_normal", flat_idx, scale, grid_idx, flat_gt)].contiguous()
                         grid_normal = outputs[("grid_normal", grid_idx, scale, grid_idx, grid_gt)].contiguous()
                         flat_nres = outputs[("flat_nres", flat_idx, scale, grid_idx, flat_gt)].contiguous()
@@ -2223,7 +2238,7 @@ class Trainer:
                 innerps = self.gen_innerp_dense(inputs, outputs)
             else:
                 n_pts_dict = self.concat_flat(outputs) ## ZMH: current version fixed the memory leak
-                if self.opt.use_normal_v2:        ## ZMH: comment this line for memory leak debug
+                if self.opt.use_normal_v2 or self.opt.use_normal_v3:        ## ZMH: comment this line for memory leak debug
                     self.get_grid_flat_normal(outputs, n_pts_dict)
                 
 
@@ -2689,7 +2704,7 @@ class Trainer:
                         "disp_{}/maskgtsp_{}".format(s, j),
                         inputs[("depth_mask_gt_sp", 0, s)][j], self.step)
 
-                if self.opt.use_normal or self.opt.use_normal_v2:
+                if self.opt.use_normal or self.opt.use_normal_v2 or self.opt.use_normal_v3:
                     writer.add_image(
                         "normal_{}/dir_{}".format(s, j),
                         outputs[("grid_normal_vis", 0, s, 0, False)][j], self.step)

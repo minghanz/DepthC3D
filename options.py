@@ -195,6 +195,9 @@ class MonodepthOptions:
         self.parser.add_argument("--use_normal_v2",
                                  help="if set, calc normal vectors from depth and used in cvo calculation, using the custom operation PtSampleInGridCalcNormal",
                                  action="store_true")
+        self.parser.add_argument("--use_normal_v3",
+                                 help="if set, normal vectors of sparse pcls are from PtSampleInGridCalcNormal, while those of dense images are from NormalFromDepthDense",
+                                 action="store_true")
         self.parser.add_argument("--random_ell",
                                  help="if set, the length scale of geometric kernel is selected randomly following a certain distribution",
                                  action="store_true")
