@@ -26,6 +26,11 @@ class MonodepthOptions:
                                  help="log directory",
                                  default=os.path.join(file_dir, "tmp"))
                               #    default=os.path.join(os.path.expanduser("~"), "tmp"))
+        
+        self.parser.add_argument("--server",
+                                 type=str,
+                                 help="the name of the server to run on",
+                                 choices=["mcity", "sunny", "home"])
 
         # TRAINING options
         self.parser.add_argument("--model_name",
@@ -36,13 +41,13 @@ class MonodepthOptions:
                                  type=str,
                                  nargs="+", 
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val", "lyft"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val", "lyft", "lyft_all"],
                                  default="eigen_zhou")
         self.parser.add_argument("--split_val",
                                  type=str,
                                  nargs="+", 
                                  help="which validation split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val", "lyft"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "TUM_split", "eigen_zhou_bench_as_val", "lyft", "lyft_all"],
                                  default="eigen_zhou")      ## This is added for easier cross-dataset training
         self.parser.add_argument("--num_layers",
                                  type=int,

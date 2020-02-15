@@ -177,11 +177,27 @@ class Trainer:
                          "kitti_depth": datasets.KITTIDepthDataset, 
                          "TUM": datasets.TUMRGBDDataset, 
                          "lyft_1024": datasets.LyftDataset} # ZMH: kitti_depth originally not shown as an option here
-        datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
-                         "kitti_odom": None, 
-                         "kitti_depth": os.path.join(script_path, "kitti_data"), 
-                         "TUM": None, 
-                         "lyft_1024": os.path.join(script_path, "data_download/train")} # ZMH: kitti_depth originally not shown as an option here
+        if self.opt.server == "mcity":
+            datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
+                            "kitti_odom": None, 
+                            "kitti_depth": os.path.join(script_path, "kitti_data"), 
+                            "TUM": None, 
+                            "lyft_1024": "/mnt/storage8t/minghanz/Datasets/lyft_kitti_seq/train"}
+        elif self.opt.server == "sunny":
+            datapath_dict = {"kitti": "/media/sda1/minghanz/datasets/kitti/kitti_data",
+                            "kitti_odom": None, 
+                            "kitti_depth": "/media/sda1/minghanz/datasets/kitti/kitti_data", 
+                            "TUM": None, 
+                            "lyft_1024": "/media/sda1/minghanz/datasets/lyft_kitti/train"}
+                            #  "lyft_1024": os.path.join(script_path, "data_download/train")} # ZMH: kitti_depth originally not shown as an option here
+        elif self.opt.server == "home":
+            datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
+                            "kitti_odom": None, 
+                            "kitti_depth": os.path.join(script_path, "kitti_data"), 
+                            "TUM": None, 
+                            "lyft_1024": None}
+        else:
+            raise ValueError("server {} not recognized.".format(self.opt.server))
         splitfile_dict = {"kitti": "{}_files.txt",
                          "kitti_odom": None, 
                          "kitti_depth": "{}_files.txt", 
