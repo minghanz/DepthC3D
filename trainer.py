@@ -342,8 +342,8 @@ class Trainer:
 
         self.set_other_params_from_opt() # moved from get_innerp_from_grid_flat
 
-        if self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3:
-            normal_from_depth_v3 = NormalFromDepthDense()
+        if self.opt.cvo_loss_dense and self.opt.dense_flat_grid and self.opt.use_normal_v3:
+            self.normal_from_depth_v3 = NormalFromDepthDense().to(self.device)
 
     def set_other_params_from_opt(self):
         
@@ -1002,8 +1002,8 @@ class Trainer:
                 grid_info_dict["nres"] = outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)]
 
             #### calculate normal from dense image, using depth gradient, residual is similar to use_normal(_v1)
-            if self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3 and not gt_flag:
-                outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] = normal_from_depth_v3(outputs[("depth_scale", frame_id, scale)], inputs[("K", scale)])
+            if self.opt.cvo_loss_dense and self.opt.dense_flat_grid and self.opt.use_normal_v3 and not gt_flag:
+                outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] = self.normal_from_depth_v3(outputs[("depth_scale", frame_id, scale)], inputs[("K", scale)])
                 outputs[("grid_nres", frame_id, scale, frame_id, gt_flag)] = res_normal_dense(outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)], \
                                                                                             outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)], inputs[("K", scale)])
                 outputs[("grid_normal_vis", frame_id, scale, frame_id, gt_flag)] = outputs[("grid_normal", frame_id, scale, frame_id, gt_flag)] * 0.5 + 0.5
@@ -1020,7 +1020,7 @@ class Trainer:
                 outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["panop"]
                 outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["seman"]  
 
-            if self.opt.use_normal or (self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3 and not gt_flag):
+            if self.opt.use_normal or (self.opt.cvo_loss_dense and self.opt.dense_flat_grid and self.opt.use_normal_v3 and not gt_flag):
                 outputs[("flat_normal", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["normal"]  
                 outputs[("flat_nres", frame_id, scale, frame_id, gt_flag)] = flat_info_dict["nres"] 
 
@@ -1045,7 +1045,7 @@ class Trainer:
                     if self.opt.use_panoptic:
                         outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)] = {}
                         outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)] = {}
-                    if self.opt.use_normal:
+                    if self.opt.use_normal or (self.opt.cvo_loss_dense and self.opt.dense_flat_grid and self.opt.use_normal_v3 and not gt_flag):
                         outputs[("flat_normal", frame_id, scale, wrap_id, gt_flag)] = {}
                         outputs[("flat_nres", frame_id, scale, wrap_id, gt_flag)] = {}
                     for ib in range(self.opt.batch_size):
@@ -1069,7 +1069,7 @@ class Trainer:
                             outputs[("flat_panop", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_panop", frame_id, scale, frame_id, gt_flag)][ib]
                             outputs[("flat_seman", frame_id, scale, wrap_id, gt_flag)][ib] = outputs[("flat_seman", frame_id, scale, frame_id, gt_flag)][ib]
 
-                        if self.opt.use_normal or (self.opt.cvo_loss_dense and self.opt.dense_flat_grid self.opt.use_normal_v3 and not gt_flag):
+                        if self.opt.use_normal or (self.opt.cvo_loss_dense and self.opt.dense_flat_grid and self.opt.use_normal_v3 and not gt_flag):
                             if frame_id == 0:
                                 Ri = Ti[:, :3, :3]
                             else:

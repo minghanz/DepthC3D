@@ -203,14 +203,14 @@ def res_normal_dense(xyz, normal, K):
 
 class NormalFromDepthDense(torch.nn.Module):
     def __init__(self):
-        super(NormalFromDepthGrad, self).__init__()
-        sobel_grad = SobelGrad()
+        super(NormalFromDepthDense, self).__init__()
+        self.sobel_grad = SobelGrad()
 
     def forward(self, depth, K):
-        grad_x, grad_y = sobel_grad(depth)
+        grad_x, grad_y = self.sobel_grad(depth)
         normal = normal_from_grad(grad_x, grad_y, depth, K)
-        # tan_x = tan_from_grad(grad_x, depth, K)
-        # tan_y = tan_from_grad(grad_x, depth, K)
+        # tan_x = tan_from_grad(grad_x, depth, K, mode="x")
+        # tan_y = tan_from_grad(grad_x, depth, K, mode="y")
         # normal = normal_from_tan(tan_x, tan_y)
         return normal
 
@@ -218,21 +218,21 @@ class SobelGrad(torch.nn.Module):
     def __init__(self):
         super(SobelGrad, self).__init__()
         filter_shape = (1, 1, 3, 3) # out_c, in_c/group, kH, kW
-        kern_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32).reshape(filter_shape) / 8.0 # normalize so that the value is a real gradient delta(d)/delta(x)
-        kern_y = self.window_x.transpose(2,3)
+        kern_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).reshape(filter_shape) / 8.0 # normalize so that the value is a real gradient delta(d)/delta(x)
+        kern_y = kern_x.transpose(2,3)
         self.register_buffer("kern_x", kern_x)
         self.register_buffer("kern_y", kern_y)
         self.pad_layer = torch.nn.ReflectionPad2d(1) # (left,right,top,bottom) or an int
         ## use a dedicated padding layer because the padding in F.conv2d only pads zeros.
 
     def forward(self, img):
-        """expect the img channel to be 1 if used in NormalFromDepthGrad, 
+        """expect the img channel to be 1 if used in NormalFromDepthDense, 
         Otherwise the return channel number is the same as input
         """
         img_pad = self.pad_layer(img)
         grad_x = torch.zeros_like(img)
         grad_y = torch.zeros_like(img)
-        for ic in img.shape[1]:
+        for ic in range(img.shape[1]):
             grad_x[:,ic:ic+1,:,:] = F.conv2d(img_pad[:,ic:ic+1,:,:], self.kern_x)
             grad_y[:,ic:ic+1,:,:] = F.conv2d(img_pad[:,ic:ic+1,:,:], self.kern_y)
         
@@ -261,12 +261,12 @@ def tan_from_grad(grad, depth, K, mode):
         tan_0 = x_hat * grad + depth / fx     #B*1*H*W
         tan_1 = y_hat * grad
         tan_2 = grad
-        tan = torch.stack( (tan_0, tan_1, tan_2), dim=1 ) # B*3*H*W
+        tan = torch.cat( (tan_0, tan_1, tan_2), dim=1 ) # B*3*H*W
     elif mode== "y":
         tan_0 = x_hat * grad    #B*1*H*W
         tan_1 = y_hat * grad + depth / fy
         tan_2 = grad
-        tan = torch.stack( (tan_0, tan_1, tan_2), dim=1 ) # B*3*H*W
+        tan = torch.cat( (tan_0, tan_1, tan_2), dim=1 ) # B*3*H*W
     else:
         raise ValueError("mode {} not recognized".format(mode))
 
@@ -275,19 +275,20 @@ def normal_from_tan(tan_x, tan_y):
     return F.normalize(normal, p=2, dim=1)
 
 def normal_from_grad(grad_x, grad_y, depth, K):
+    """grad_x: B*1*H*W"""
     y_range = torch.arange(grad_x.shape[2], device=grad_x.device, dtype=grad_x.dtype) # height, y, v
     x_range = torch.arange(grad_x.shape[3], device=grad_x.device, dtype=grad_x.dtype) # width, x, u
-    grid_y, grid_x = torch.meshgrid(y_range, x_range) ## [height * width]
+    grid_y, grid_x = torch.meshgrid(y_range, x_range) ## H*W
 
-    fx = K[0,0]
-    fy = K[1,1]
-    cx = K[0,2]
-    cy = K[1,2]
+    fx = K[:,0,0].reshape(-1, 1, 1, 1) # B*1*1*1
+    fy = K[:,1,1].reshape(-1, 1, 1, 1)
+    cx = K[:,0,2].reshape(-1, 1, 1, 1)
+    cy = K[:,1,2].reshape(-1, 1, 1, 1)
 
     normal_0 = -fy * grad_x
     normal_1 = -fx * grad_y
     normal_2 = (grid_x - cx) * grad_x + (grid_y - cy) * grad_y + depth
-    normal = torch.stack([normal_0, normal_1, normal_2], dim=1)
+    normal = torch.cat([normal_0, normal_1, normal_2], dim=1)
     return F.normalize(normal, p=2, dim=1)
 
 def grid_from_concat_flat_func(uvb_split, flat_info, grid_shape):
