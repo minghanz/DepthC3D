@@ -103,8 +103,9 @@ class PtSampleInGridWithNormal(Function):
         dx1, dx2, dn1, dn2, dr1, dr2 = cvo_dense_with_normal.backward( \
             dy, pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, ctx.neighbor_range, ctx.ell, ctx.mag_max, ctx.mag_min, ctx.ignore_ib, ctx.norm_in_dist, ctx.ell_basedist)
         # return None, dx1, dx2, None, dn1, dn2, dr1, dr2, None, None, None, None, None, None, None, None, None
-        return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None, None, None, None
-        
+        # return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None, None, None, None
+        return None, dx1, dx2, None, dn1, dn2, None, None, None, None, None, None, None, None, None, None, None
+
 class PtSampleInGridCalcNormal(Function):
     @staticmethod
     def forward(ctx, pts, grid_source, grid_valid, neighbor_range, ignore_ib):

@@ -505,6 +505,8 @@ class Trainer:
                 loss = losses["loss"] / self.opt.iters_per_update
             if self.opt.disp_in_loss:
                 loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
+            if self.opt.depth_in_loss:
+                loss += 0.1 * (losses["loss_depth/0"]+ losses["loss_depth/1"] + losses["loss_depth/2"] + losses["loss_depth/3"]) / self.num_scales / self.opt.iters_per_update
             if self.opt.supervised_by_gt_depth:
                 # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
                 # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
@@ -2031,10 +2033,10 @@ class Trainer:
                     #     draw3DPts(outputs[("xyz_gt", 0, 0)][ib].detach()[:,:3,:], pcl_2=outputs[("xyz_gt", frame_id, scale)][ib].detach()[:,:3,:], 
                     #         color_1=outputs[("rgb_gt", 0, 0)][ib].detach(), color_2=outputs[("rgb_gt", frame_id, scale)][ib].detach())
 
-                    if not self.opt.cvo_loss_dense:
-                        for ib in range(self.opt.batch_size):
-                            print(outputs[("rgb_gt", 0, 0)][ib]*255)
-                            visualize_pcl(outputs[("xyz_gt", 0, 0)][ib].detach()[:,:3,:], rgb=outputs[("rgb_gt", 0, 0)][ib].detach() )
+                    # if not self.opt.cvo_loss_dense:
+                    #     for ib in range(self.opt.batch_size):
+                    #         print(outputs[("rgb_gt", 0, 0)][ib]*255)
+                    #         visualize_pcl(outputs[("xyz_gt", 0, 0)][ib].detach()[:,:3,:], rgb=outputs[("rgb_gt", 0, 0)][ib].detach() )
                     
 
                 if not self.opt.disable_automasking:
@@ -2238,6 +2240,29 @@ class Trainer:
         disp_error = torch.mean(torch.abs(disp_masked - disp_gt_masked))
         return disp_error
 
+    def compute_depth_losses_train(self, inputs, outputs, outputs_others):
+        depth_losses = {}
+        for scale in self.opt.scales:
+            for frame_id in self.opt.frame_ids:
+                if frame_id == 0:
+                    disp = outputs[("disp", scale)]
+                else:
+                    disp = outputs_others[frame_id][("disp", scale)]
+                depth_gt = inputs[("depth_gt_scale", frame_id, scale)]
+                _, depth_pred = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+                # print("disp_gt range", torch.min(disp_gt), torch.max(disp_gt))
+                if frame_id == self.opt.frame_ids[0]:
+                    depth_losses[scale] = torch.tensor(0, dtype=torch.float32, device=self.device)
+                depth_losses[scale] += self.compute_depth_loss_train(depth_pred, depth_gt)
+        return depth_losses
+    
+    def compute_depth_loss_train(self, depth_pred, depth_gt):
+        mask = depth_gt > 0
+        depth_gt_masked = depth_gt[mask] # becomes a 1-D tensor
+        depth_pred_masked = depth_pred[mask]
+
+        depth_error = torch.mean(torch.abs(depth_pred_masked - depth_gt_masked))
+        return depth_error
 
     def compute_losses(self, inputs, outputs, outputs_others):
         """Compute the reprojection and smoothness losses for a minibatch
@@ -2289,6 +2314,10 @@ class Trainer:
         disp_losses = self.compute_disp_losses(inputs, outputs, outputs_others)
         for scale in self.opt.scales:
             losses["loss_disp/{}".format(scale)] = disp_losses[scale]
+
+        depth_losses = self.compute_depth_losses_train(inputs, outputs, outputs_others)
+        for scale in self.opt.scales:
+            losses["loss_depth/{}".format(scale)] = depth_losses[scale]
         
         if not self.train_flag or self.opt.supervised_by_gt_depth:
             if self.opt.cvo_loss and not (self.opt.cvo_loss_dense and self.opt.dense_flat_grid):

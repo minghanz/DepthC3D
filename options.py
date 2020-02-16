@@ -179,6 +179,9 @@ class MonodepthOptions:
         self.parser.add_argument("--disp_in_loss",
                                  help="if set, disparity L1 difference is used in depth training",
                                  action="store_true")
+        self.parser.add_argument("--depth_in_loss",
+                                 help="if set, depth L1 difference is used in depth training",
+                                 action="store_true")
         self.parser.add_argument("--cvo_loss_dense",
                                  help="if set, calculate cvo loss using dense image",
                                  action="store_true")
