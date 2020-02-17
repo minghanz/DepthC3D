@@ -241,6 +241,10 @@ class MonodepthOptions:
                                  type=int,
                                  help="neighbor range when calculating inner product",
                                  default=2)
+        self.parser.add_argument("--normal_nrange",
+                                 type=int,
+                                 help="neighbor range when calculating normal direction on sparse point cloud",
+                                 default=5)
         self.parser.add_argument("--ell_geo",
                                  type=float, 
                                  help="the ell used in geometric kernel",
