@@ -504,9 +504,9 @@ class Trainer:
             else:
                 loss = losses["loss"] / self.opt.iters_per_update
             if self.opt.disp_in_loss:
-                loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update
+                loss += 0.1 * (losses["loss_disp/0"]+ losses["loss_disp/1"] + losses["loss_disp/2"] + losses["loss_disp/3"]) / self.num_scales / self.opt.iters_per_update      ## magnitude of 0.1
             if self.opt.depth_in_loss:
-                loss += 0.1 * (losses["loss_depth/0"]+ losses["loss_depth/1"] + losses["loss_depth/2"] + losses["loss_depth/3"]) / self.num_scales / self.opt.iters_per_update
+                loss += 1e-3 * (losses["loss_depth/0"]+ losses["loss_depth/1"] + losses["loss_depth/2"] + losses["loss_depth/3"]) / self.num_scales / self.opt.iters_per_update ## magnitude of 10
             if self.opt.supervised_by_gt_depth:
                 # loss += 0.1 * losses["loss_cos/sum"] / self.num_scales / self.opt.iters_per_update
                 # loss += 1e-6 * losses["loss_inp/sum"] / self.num_scales / self.opt.iters_per_update
@@ -1212,7 +1212,7 @@ class Trainer:
         pts = outputs[("flat_uv", frame_id, scale, frame_id, gt_flag)]
         grid_source = outputs[("grid_xyz", frame_id, scale, frame_id, gt_flag)]
         grid_valid = outputs[("grid_valid", frame_id, scale, frame_id, gt_flag)]
-        neighbor_range = int(5)
+        neighbor_range = int(self.opt.normal_nrange) ## change from 5 to option at Feb 16 18:27. This number does not affect memory consumption
         ignore_ib = False
         min_dist_2 = 0.05
         with torch.no_grad():
@@ -1632,7 +1632,7 @@ class Trainer:
                 losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[combo_][scale]
                 losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[combo_][scale]
                 # losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
-                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - self.feats_ell["xyz"]*self.feats_ell["xyz"]*torch.log( inp_dict[combo_][scale] ) # Jan 16: use log!
+                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - self.feats_ell["xyz"]*torch.log( inp_dict[combo_][scale] ) # Jan 16: use log!
                 try:
                     assert not torch.isnan(losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]).any(), "{} {} nan detected".format(scale, frame_id)
                     assert not torch.isinf(losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]).any(), "{} {} inf detected".format(scale, frame_id)
