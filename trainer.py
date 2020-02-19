@@ -1647,7 +1647,7 @@ class Trainer:
                 losses["loss_cvo/{}_s{}_f{}".format(True, scale, frame_id)] = dist_dict[combo_][scale]
                 losses["loss_cos/{}_s{}_f{}".format(True, scale, frame_id)] = cos_dict[combo_][scale]
                 # losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = inp_dict[combo_][scale]
-                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - self.feats_ell["xyz"]*torch.log( inp_dict[combo_][scale] ) # Jan 16: use log!
+                losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)] = - self.feats_ell["xyz"]*self.feats_ell["xyz"]*torch.log( inp_dict[combo_][scale] ) # Jan 16: use log!
                 try:
                     assert not torch.isnan(losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]).any(), "{} {} nan detected".format(scale, frame_id)
                     assert not torch.isinf(losses["loss_inp/{}_s{}_f{}".format(True, scale, frame_id)]).any(), "{} {} inf detected".format(scale, frame_id)
