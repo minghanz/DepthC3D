@@ -45,7 +45,7 @@ def depth_to_disp(depth, min_depth, max_depth, ref_depth=0, depth_ref_mode=False
         eps_b = min_depth
         zeros_ = torch.zeros_like(depth)
         clamped_depth = torch.where(depth > 0, torch.clamp(depth, min=min_depth, max=max_depth), zeros_ )
-        disp = ref_depth / (clamped_depth + ref_depth - eps_b) - eps_a
+        disp = torch.where(clamped_depth > 0, ref_depth / (clamped_depth + ref_depth - eps_b) - eps_a, zeros_)
     return disp
 
 def transformation_from_parameters(axisangle, translation, invert=False):
