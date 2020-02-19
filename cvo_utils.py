@@ -223,7 +223,8 @@ class SobelGrad(torch.nn.Module):
         kern_y = kern_x.transpose(2,3)
         self.register_buffer("kern_x", kern_x)
         self.register_buffer("kern_y", kern_y)
-        self.pad_layer = torch.nn.ReflectionPad2d(1) # (left,right,top,bottom) or an int
+        # self.pad_layer = torch.nn.ReflectionPad2d(1) # (left,right,top,bottom) or an int
+        self.pad_layer = torch.nn.ReplicationPad2d(1)
         ## use a dedicated padding layer because the padding in F.conv2d only pads zeros.
 
     def forward(self, img):
@@ -231,6 +232,7 @@ class SobelGrad(torch.nn.Module):
         Otherwise the return channel number is the same as input
         """
         img_pad = self.pad_layer(img)
+        img_pad[:,:,-1, :] = 2 * img_pad[:,:,-2, :] - img_pad[:,:,-3, :]        ## so that the last row's vertical gradient is decided by the last two rows
         grad_x = torch.zeros_like(img)
         grad_y = torch.zeros_like(img)
         for ic in range(img.shape[1]):

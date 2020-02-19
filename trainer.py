@@ -70,7 +70,16 @@ def my_collate_fn(batch):
 class Trainer:
     def __init__(self, options, ups_arg, ups_cfg):
         self.opt = options
-        self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
+        if self.opt.server == "mcity":
+            self.log_dir = "/mnt/storage8t/minghanz/tmp"
+        elif self.opt.server == "sunny":
+            self.log_dir = "/media/sda1/minghanz/tmp"
+        elif self.opt.server == "home":
+            self.log_dir = os.path.join(script_path, "tmp")
+        else:
+            raise ValueError("server {} not recognized.".format(self.opt.server))
+
+        self.log_path = os.path.join(self.log_dir, self.opt.model_name)
         torch_vs = (torch.__version__).split('.')
         self.torch_version = float(torch_vs[0]) + 0.1 * float(torch_vs[1])
 
@@ -168,7 +177,7 @@ class Trainer:
             self.load_model()
 
         print("Training model named:\n  ", self.opt.model_name)
-        print("Models and tensorboard events files are saved to:\n  ", self.opt.log_dir)
+        print("Models and tensorboard events files are saved to:\n  ", self.log_dir)
         print("Training is using:\n  ", self.device)
 
         # data
@@ -317,20 +326,26 @@ class Trainer:
         if self.opt.disable_log:
             self.path_model = None
             self.path_opt = None
-            self.path_pcd = None
             self.writers = None
-            self.nkern_path = None
         else:
             self.path_model = os.path.join(self.log_path, "models" + "_"+self.ctime)
             self.path_opt = self.path_model
-            self.path_pcd = os.path.join(self.log_path, "pcds_"+self.ctime)
             self.writers = {}
             for mode in ["train", "val", "val_set"]:
-                # self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
                 self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode + '_' + self.ctime))
+        
+        if self.opt.save_pic_intv != 0:
             self.nkern_path = os.path.join(self.log_path, "nkerns_"+self.ctime)
             if not os.path.exists(self.nkern_path):
                 os.makedirs(self.nkern_path)
+        else:
+            self.nkern_path = None
+        if self.opt.save_pcd_intv != 0:
+            self.path_pcd = os.path.join(self.log_path, "pcds_"+self.ctime)
+            if not os.path.exists(self.path_pcd):
+                os.makedirs(self.path_pcd)
+        else:
+            self.path_pcd = None
 
         if not self.opt.no_ssim:
             self.ssim = SSIM()
@@ -799,7 +814,7 @@ class Trainer:
                 disp, [self.height_dict[self.cur_datasrc], self.width_dict[self.cur_datasrc]], mode="bilinear", align_corners=False)
             source_scale = 0
 
-        _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+        _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
         return depth, source_scale
 
     def gen_pcl_gt(self, inputs, outputs, disp, scale, frame_id, T_inv=None):
@@ -2225,7 +2240,7 @@ class Trainer:
                 else:
                     disp = outputs_others[frame_id][("disp", scale)]
                 depth_gt = inputs[("depth_gt_scale", frame_id, scale)]
-                disp_gt = depth_to_disp(depth_gt, self.opt.min_depth, self.opt.max_depth)
+                disp_gt = depth_to_disp(depth_gt, self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
                 # print("disp_gt range", torch.min(disp_gt), torch.max(disp_gt))
                 if frame_id == self.opt.frame_ids[0]:
                     disp_losses[scale] = torch.tensor(0, dtype=torch.float32, device=self.device)
@@ -2249,7 +2264,7 @@ class Trainer:
                 else:
                     disp = outputs_others[frame_id][("disp", scale)]
                 depth_gt = inputs[("depth_gt_scale", frame_id, scale)]
-                _, depth_pred = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+                _, depth_pred = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
                 # print("disp_gt range", torch.min(disp_gt), torch.max(disp_gt))
                 if frame_id == self.opt.frame_ids[0]:
                     depth_losses[scale] = torch.tensor(0, dtype=torch.float32, device=self.device)
@@ -2283,7 +2298,7 @@ class Trainer:
                     self.get_grid_flat_normal(outputs, n_pts_dict)
                 
 
-                if self.step % 4000 == 0: ## ZMH: comment this line for memory leak debug! 
+                if self.step % self.opt.save_pcd_intv == 0: ## ZMH: comment this line for memory leak debug! 
                     self.save_pcd(outputs, n_pts_dict)
 
                 innerps, dists, coss = self.get_innerp_from_grid_flat(inputs, outputs, n_pts_dict)
@@ -2730,7 +2745,7 @@ class Trainer:
 
                 # if s == 0:
                     # print('shape 1', outputs[("disp", s)][j].shape)
-                disp = depth_to_disp(inputs[("depth_gt_scale", 0, s)][j], self.opt.min_depth, self.opt.max_depth)
+                disp = depth_to_disp(inputs[("depth_gt_scale", 0, s)][j], self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
                 # disp = disp.squeeze(1)
                 # print('shape 2', disp.shape)
                 writer.add_image(

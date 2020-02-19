@@ -1,0 +1,53 @@
+---
+# system setup
+model_name: "mono_model_KITTI_Lidar"
+log_frequency: 100
+cuda_n: 0
+save_pic_intv: 4000
+server: "sunny"
+disable_log: false
+
+# training setup
+batch_size: 2
+iters_per_update: 4
+scheduler_step_size: 10
+num_layers: 50
+num_workers: 4
+
+# depth meta setup
+depth_in_loss: true
+disp_in_loss: false
+min_depth: 1.0
+ref_depth: 10
+depth_ref_mode: true
+
+# cvo meta setup
+cvo_loss: false
+cvo_loss_dense: false
+dense_flat_grid: false
+supervised_by_gt_depth: false
+# cvo_loss: true
+# cvo_loss_dense: true
+# dense_flat_grid: true
+# supervised_by_gt_depth: true
+
+# cvo params
+use_normal_v3: false
+norm_in_dist: false
+neighbor_range: 2
+normal_nrange: 9
+ell_basedist: 10.0
+random_ell: true
+ell_geo: 0.1
+ell_min: 0.05
+
+# dataset setup
+dataset: 
+    - kitti
+dataset_val: 
+    - kitti
+split_train:
+    - eigen_zhou
+split_val:
+    - eigen_zhou
+load_weights_folder: 

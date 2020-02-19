@@ -17,8 +17,16 @@ sys.path.append(os.path.join(script_path, '../UPSNet'))
 from upsnet.config.config import config
 from wrap_to_panoptic import parse_args
 
+import yaml
+
 options = MonodepthOptions()
 opts, rest = options.parse()
+if opts.config_file:
+    with open(opts.config_file) as f:
+        data = yaml.safe_load(f)
+        arg_dict = opts.__dict__
+        arg_dict.update(data)
+
 ups_arg = None
 if opts.use_panoptic:
     ups_arg = parse_args(inputs=rest)

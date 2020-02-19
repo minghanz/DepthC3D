@@ -21,11 +21,11 @@ class MonodepthOptions:
      #                             type=str,
      #                             help="path to the training data",
      #                             default=os.path.join(file_dir, "kitti_data"))     ## comment this because written in trainer.py for easier cross-dataset training
-        self.parser.add_argument("--log_dir",
-                                 type=str,
-                                 help="log directory",
-                                 default=os.path.join(file_dir, "tmp"))
-                              #    default=os.path.join(os.path.expanduser("~"), "tmp"))
+      #   self.parser.add_argument("--log_dir",
+      #                            type=str,
+      #                            help="log directory",
+      #                            default=os.path.join(file_dir, "tmp"))
+      #                         #    default=os.path.join(os.path.expanduser("~"), "tmp"))
         
         self.parser.add_argument("--server",
                                  type=str,
@@ -106,6 +106,9 @@ class MonodepthOptions:
                                  type=float,
                                  help="ref depth r in r/(r+d)",
                                  default=10.0)
+        self.parser.add_argument("--depth_ref_mode",
+                                 help="use r/(r+d) as disp",
+                                 action="store_true")
 
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size",
@@ -264,6 +267,9 @@ class MonodepthOptions:
                                  type=int,
                                  help="interval between two image-saving iteration. Disabled if set to 0.",
                                  default=4000)
+        self.parser.add_argument("--config_file",
+                                 type=str,
+                                 help="to load options from file")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",

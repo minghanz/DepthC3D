@@ -13,25 +13,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def disp_to_depth(disp, min_depth, max_depth):
+def disp_to_depth(disp, min_depth, max_depth, ref_depth=0, depth_ref_mode=False):
     """Convert network's sigmoid output into depth prediction
     The formula for this conversion is given in the 'additional considerations'
     section of the paper.
     """
-    min_disp = 1 / max_depth
-    max_disp = 1 / min_depth
-    scaled_disp = min_disp + (max_disp - min_disp) * disp
-    depth = 1 / scaled_disp
+    if not depth_ref_mode:
+        min_disp = 1 / max_depth
+        max_disp = 1 / min_depth
+        scaled_disp = min_disp + (max_disp - min_disp) * disp
+        depth = 1 / scaled_disp
+    else:
+        eps_a = ref_depth / (max_depth + ref_depth)
+        eps_b = min_depth
+        depth = ref_depth / (disp + eps_a) - ref_depth + eps_b
+        scaled_disp = disp
+
     return scaled_disp, depth
 
 ## ZMH: added by me. to visualize gt depth as disp
-def depth_to_disp(depth, min_depth, max_depth):
-    min_disp = 1 / max_depth
-    max_disp = 1 / min_depth
-    # scaled_disp = torch.where(depth > 0, 1 / depth, 0)
-    zeros_ = torch.zeros_like(depth)
-    scaled_disp = torch.where(depth > 0, torch.clamp(1 / depth, min=min_disp, max=max_disp), zeros_)
-    disp = torch.where(scaled_disp > 0, ( scaled_disp - min_disp ) / (max_disp - min_disp), zeros_)
+def depth_to_disp(depth, min_depth, max_depth, ref_depth=0, depth_ref_mode=False):
+    if not depth_ref_mode:
+        min_disp = 1 / max_depth
+        max_disp = 1 / min_depth
+        # scaled_disp = torch.where(depth > 0, 1 / depth, 0)
+        zeros_ = torch.zeros_like(depth)
+        scaled_disp = torch.where(depth > 0, torch.clamp(1 / depth, min=min_disp, max=max_disp), zeros_)
+        disp = torch.where(scaled_disp > 0, ( scaled_disp - min_disp ) / (max_disp - min_disp), zeros_)
+    else:
+        eps_a = ref_depth / (max_depth + ref_depth)
+        eps_b = min_depth
+        zeros_ = torch.zeros_like(depth)
+        clamped_depth = torch.where(depth > 0, torch.clamp(depth, min=min_depth, max=max_depth), zeros_ )
+        disp = ref_depth / (clamped_depth + ref_depth - eps_b) - eps_a
     return disp
 
 def transformation_from_parameters(axisangle, translation, invert=False):

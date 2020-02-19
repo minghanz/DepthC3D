@@ -22,7 +22,7 @@ def error_disp(disp, gt_depth, opt):
     # disp = F.interpolate(
     #             disp, [gt_height, gt_width], mode="bilinear", align_corners=False)
 
-    scaled_disp, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth)
+    scaled_disp, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth, opt.ref_depth, opt.depth_ref_mode)
 
     ###################### switch to eval mode ##########################
     # pred_depth_np = pred_depth.cpu().numpy()[0,0]

@@ -12,14 +12,15 @@ def error_disp(disp, gt_depth, opt):
     """
     gt_height, gt_width = gt_depth.shape[:2]
 
-    scaled_disp, _ = disp_to_depth(disp, opt.min_depth, opt.max_depth)
-    scaled_disp = scaled_disp.cpu()[0, 0].numpy()
-
-    # print("scaled_disp", scaled_disp.shape)
-    # print("gt shape", gt_height, gt_width)
-    
-    scaled_disp = cv2.resize(scaled_disp, (gt_width, gt_height))
-    pred_depth = 1 / scaled_disp
+    if not opt.depth_ref_mode:
+        scaled_disp, _ = disp_to_depth(disp, opt.min_depth, opt.max_depth)
+        scaled_disp = scaled_disp.cpu()[0, 0].numpy()
+        
+        scaled_disp = cv2.resize(scaled_disp, (gt_width, gt_height))
+        pred_depth = 1 / scaled_disp
+    else:
+        scaled_disp = cv2.resize(disp, (gt_width, gt_height))
+        _, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth, opt.ref_depth, opt.depth_ref_mode)
 
     losses = compute_depth_losses(gt_depth, pred_depth, depth_metric_names, opt)
 
