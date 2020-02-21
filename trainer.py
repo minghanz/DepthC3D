@@ -451,22 +451,25 @@ class Trainer:
         """
         Use pretrained weights to run val set and log error to tensorboard
         """
-        model_folder_list = os.listdir(self.opt.load_weights_folder_parent)
-        # file_name_digit = [int(file_names[i].split('.')[0]) for i in range(len(file_names))]
-        # file_name_idx = sorted(range(len(file_name_digit)),key=file_name_digit.__getitem__)
-        # file_names = [file_names[i] for i in file_name_idx]
+        if "weights" in self.opt.load_weights_folder_parent:
+            model_folders = [self.opt.load_weights_folder_parent]
+        else:
+            model_folder_list = os.listdir(self.opt.load_weights_folder_parent)
+            # file_name_digit = [int(file_names[i].split('.')[0]) for i in range(len(file_names))]
+            # file_name_idx = sorted(range(len(file_name_digit)),key=file_name_digit.__getitem__)
+            # file_names = [file_names[i] for i in file_name_idx]
 
-        model_folders = []
-        model_seq = []
-        for item in model_folder_list:
-            path = os.path.join(self.opt.load_weights_folder_parent, item)
-            if os.path.isdir(path):
-                model_folders.append(path)
-                weight_num=float(item.split('_')[-1])
-                model_seq.append(weight_num)
-        
-        model_folders_idx = sorted(range(len(model_seq)), key=model_seq.__getitem__)
-        model_folders = [model_folders[i] for i in model_folders_idx]
+            model_folders = []
+            model_seq = []
+            for item in model_folder_list:
+                path = os.path.join(self.opt.load_weights_folder_parent, item)
+                if os.path.isdir(path):
+                    model_folders.append(path)
+                    weight_num=float(item.split('_')[-1])
+                    model_seq.append(weight_num)
+            
+            model_folders_idx = sorted(range(len(model_seq)), key=model_seq.__getitem__)
+            model_folders = [model_folders[i] for i in model_folders_idx]
 
         
         for model_folder in model_folders:
@@ -1482,8 +1485,9 @@ class Trainer:
             filename = os.path.join(self.nkern_path, "{}".format(self.step) )
             save_tensor_to_img(inputs[("color", 0, 0)], filename, "rgb")
             save_tensor_to_img(outputs[("disp", 0)], filename, "dep")
-            save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,False)], filename, "nml_pred")
-            save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,True)], filename, "nml_gt")
+            if self.opt.use_normal or self.opt.use_normal_v2 or self.opt.use_normal_v3:
+                save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,False)], filename, "nml_pred")
+                save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,True)], filename, "nml_gt")
 
 
         # neighbor_range = int(2)
@@ -2298,7 +2302,7 @@ class Trainer:
                     self.get_grid_flat_normal(outputs, n_pts_dict)
                 
 
-                if self.step % self.opt.save_pcd_intv == 0: ## ZMH: comment this line for memory leak debug! 
+                if self.opt.save_pcd_intv != 0 and self.step % self.opt.save_pcd_intv == 0: ## ZMH: comment this line for memory leak debug! 
                     self.save_pcd(outputs, n_pts_dict)
 
                 innerps, dists, coss = self.get_innerp_from_grid_flat(inputs, outputs, n_pts_dict)

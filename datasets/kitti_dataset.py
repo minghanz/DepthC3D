@@ -16,6 +16,7 @@ from .mono_dataset import MonoDataset
 
 from skimage.morphology import binary_dilation, binary_closing
 import torch
+import cv2
 
 class KITTIDataset(MonoDataset):
     """Superclass for different types of KITTI dataset loaders
@@ -109,6 +110,106 @@ class TUMRGBDDataset(MonoDataset):
         image_path = os.path.join(
             self.data_path, folder, "rgb", f_str)
         return image_path
+
+class VKITTIDataset(MonoDataset):
+    """For VKITTI2 dataset"""
+    def __init__(self, *args, **kwargs):
+        super(VKITTIDataset, self).__init__(*args, **kwargs)
+
+        self.full_res_shape = (1242, 375)
+        self.side_map = {"2": 0, "3": 1, "l": 0, "r": 1}
+
+        self.K_ = np.array([[725.0087, 0, 620.5, 0], 
+                            [0, 725.0087, 187, 0], 
+                            [0, 0, 1, 0], 
+                            [0, 0, 0, 1]])
+
+    def check_depth(self):
+        line = self.filenames[0].split()
+        scene_name = line[0]
+        frame_index = int(line[1])
+        side = line[2]
+
+        velo_filename = self.get_depth_path(scene_name, frame_index, side)
+        
+        return os.path.isfile(velo_filename)
+
+    def get_image_path(self, folder, frame_index, side):
+        f_str = "rgb_{:05d}{}".format(frame_index, self.img_ext)
+        image_path = os.path.join(
+            self.data_path, folder, "clone", "frames", "rgb", "Camera_{}".format(self.side_map[side]), f_str)
+        return image_path
+
+    def get_depth_path(self, folder, frame_index, side):
+        f_str = "depth_{:05d}.png".format(frame_index)
+        depth_path = os.path.join(
+            self.data_path, folder, "clone", "frames", "depth", "Camera_{}".format(self.side_map[side]), f_str)
+        return depth_path
+
+    def get_color(self, folder, frame_index, side, do_flip):
+        color = self.loader(self.get_image_path(folder, frame_index, side))
+        if do_flip:
+            color = color.transpose(pil.FLIP_LEFT_RIGHT)
+        return color
+
+    def get_depth(self, folder, frame_index, side, do_flip):
+        depth_path = self.get_depth_path(folder, frame_index, side)
+
+        depth = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        depth = depth.astype(np.float32) / 100
+        depth[depth>500] = 0
+        if do_flip:
+            depth_gt = np.fliplr(depth_gt)
+
+        return depth_gt
+
+    def get_depth_related(self, folder, frame_index, side, do_flip, inputs):
+        """
+        inputs["depth_gt"]
+        inputs[("depth_gt_scale", i, -1)]
+        inputs[("depth_mask", i, j)]
+        inputs[("depth_mask_gt", i, j)]
+        """
+        depth_gt = self.get_depth(folder, frame_index, side, do_flip)
+
+        inputs["depth_gt"] = np.expand_dims(depth_gt, 0)
+        inputs["depth_gt"] = torch.from_numpy(inputs["depth_gt"].astype(np.float32))
+
+        for scale in range(self.num_scales):
+            K = self.K_.copy()
+            K[0, :] = K[0, :] / float(self.full_res_shape[0])
+            K[1, :] = K[1, :] / float(self.full_res_shape[1])
+            K[0, :] *= self.width // (2 ** scale)
+            K[1, :] *= self.height // (2 ** scale)
+
+            inv_K = np.linalg.pinv(K)
+
+            inputs[("K", scale)] = torch.from_numpy(K).to(dtype=torch.float32)
+            inputs[("inv_K", scale)] = torch.from_numpy(inv_K).to(dtype=torch.float32)
+
+        for i in self.frame_idxs:
+            if i == "s":
+                other_side = {"r": "l", "l": "r"}[side]
+                inputs[("depth_gt_scale", i, -1)] = self.get_depth(folder, frame_index, other_side, do_flip)
+            else:
+                inputs[("depth_gt_scale", i, -1)] = self.get_depth(folder, frame_index + i, side, do_flip)
+            
+            for j in range(self.num_scales):
+                new_w = self.width // (2 ** j)
+                new_h = self.height // (2 ** j)
+
+                depth_gt = skimage.transform.resize(inputs[("depth_gt_scale", i, -1)], (new_h, new_w), order=0, preserve_range=True, mode='constant', anti_aliasing=False)
+                mask = depth_gt > 0
+                mask = np.expand_dims(mask, 0)
+                inputs[("depth_mask", i, j)] = torch.from_numpy(mask)
+
+                depth_gt = np.expand_dims(depth_gt, 0)
+                inputs[("depth_gt_scale", i, j)] = torch.from_numpy(depth_gt.astype(np.float32))
+                inputs[("depth_mask_gt", i, j)] = inputs[("depth_mask", i, j)]
+            
+            depth_gt = np.expand_dims(inputs[("depth_gt_scale", i, -1)], 0)
+            inputs[("depth_gt_scale", i, -1)] = torch.from_numpy(depth_gt.astype(np.float32))
+
 
 class LyftDataset(MonoDataset):
     """ For lyft dataset
