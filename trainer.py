@@ -417,6 +417,7 @@ class Trainer:
             m.train()
 
         self.train_flag = True
+        self.run_mode = "train"
 
     def set_eval(self):
         """Convert all models to testing/evaluation mode
@@ -425,6 +426,16 @@ class Trainer:
             m.eval()
 
         self.train_flag = False
+        self.run_mode = "val"
+    
+    def set_eval_set(self):
+        """Convert all models to testing/evaluation mode, used in val_set
+        """
+        for m in self.models.values():
+            m.eval()
+
+        self.train_flag = False
+        self.run_mode = "val_set"
 
     def train(self):
         """Run the entire training pipeline
@@ -471,13 +482,13 @@ class Trainer:
             model_folders_idx = sorted(range(len(model_seq)), key=model_seq.__getitem__)
             model_folders = [model_folders[i] for i in model_folders_idx]
 
-        
+        self.weight_n = 0
         for model_folder in model_folders:
             self.opt.load_weights_folder = model_folder
             self.load_model()
 
             self.val_set()
-            self.step += 1
+            self.weight_n += 1
 
 
     def run_epoch(self):
@@ -767,7 +778,7 @@ class Trainer:
         self.set_train()
 
     def val_set(self):
-        self.set_eval()
+        self.set_eval_set()
         print("------------------")
         print("Evaluating on the whole validating set at Epoch {}...".format(self.epoch))
         losses_sum = {}
@@ -775,6 +786,10 @@ class Trainer:
         with torch.no_grad():
             self.geo_scale = 0.1
             self.show_range = False
+
+            if self.opt.val_set_only:
+                self.step = 0
+
             for batch_idx, inputs in enumerate(self.val_loader):
                 outputs, losses = self.process_batch(inputs)
                 if "depth_gt" in inputs:
@@ -789,6 +804,9 @@ class Trainer:
 
                 if batch_idx % 200 == 0:
                     print("Passed {} mini-batches in {:.2f} secs.".format(batch_idx, time.time()-val_start_time) )
+
+                if self.opt.val_set_only:
+                    self.step += 1
 
             val_end_time = time.time()
             print("Val time: {:.2f}".format(val_end_time - val_start_time) )
@@ -1176,6 +1194,8 @@ class Trainer:
     def save_pcd(self, outputs, n_pts_dict):
         frame_id = 0
         for scale in self.opt.scales:
+            if scale != 0:  ## only save pcl of original scale
+                continue
             for gt_flag in [True, False]:
                 n_pts = {}
                 n_pts[0] = 0
@@ -1481,10 +1501,12 @@ class Trainer:
         inp_feat_combos = self.inp_feat_combo_from_dist_combo(self.dist_combos)
         
         ### save imgs
-        if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 :
+        if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and self.run_mode in self.opt.save_pcd_pic_mode:
             filename = os.path.join(self.nkern_path, "{}".format(self.step) )
             save_tensor_to_img(inputs[("color", 0, 0)], filename, "rgb")
             save_tensor_to_img(outputs[("disp", 0)], filename, "dep")
+            save_tensor_to_img(inputs[("disp_gt_scale", 0, 0)], filename, "dep_gt")
+            
             if self.opt.use_normal or self.opt.use_normal_v2 or self.opt.use_normal_v3:
                 save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,False)], filename, "nml_pred")
                 save_tensor_to_img(outputs[("grid_normal_vis", 0,0,0,True)], filename, "nml_gt")
@@ -1535,7 +1557,7 @@ class Trainer:
                         # inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
                         #     flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist)
                         
-                        if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and flat_idx == grid_idx and flat_idx == 0 and scale == 0:
+                        if False: #self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and flat_idx == grid_idx and flat_idx == 0 and scale == 0 and self.run_mode in self.opt.save_pcd_pic_mode:
                             filename = os.path.join(self.nkern_path, "{}_{}_{}_{}_{}".format(self.step, flat_idx, scale, grid_idx, flat_gt ) )
                             filename_nkern = "{}_nkern".format(filename)
                             inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
@@ -1908,6 +1930,11 @@ class Trainer:
 
             depth, source_scale = self.from_disp_to_depth(disp, scale)
             outputs[("depth", 0, scale)] = depth
+
+            inputs[("disp_gt_scale", 0, scale)] = depth_to_disp(inputs[("depth_gt_scale", 0, scale)], self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode )
+            for frame_id in self.opt.frame_ids[1:]:
+                inputs[("disp_gt_scale", frame_id, scale)] = depth_to_disp(inputs[("depth_gt_scale", frame_id, scale)], self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode )
+            
             ##----------------------
             # if self.opt.v1_multiscale or force_multiscale:
             #     source_scale = scale
@@ -2243,8 +2270,9 @@ class Trainer:
                     disp = outputs[("disp", scale)]
                 else:
                     disp = outputs_others[frame_id][("disp", scale)]
-                depth_gt = inputs[("depth_gt_scale", frame_id, scale)]
-                disp_gt = depth_to_disp(depth_gt, self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
+                # depth_gt = inputs[("depth_gt_scale", frame_id, scale)]
+                # disp_gt = depth_to_disp(depth_gt, self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
+                disp_gt = inputs[("disp_gt_scale", frame_id, scale)]
                 # print("disp_gt range", torch.min(disp_gt), torch.max(disp_gt))
                 if frame_id == self.opt.frame_ids[0]:
                     disp_losses[scale] = torch.tensor(0, dtype=torch.float32, device=self.device)
@@ -2302,7 +2330,7 @@ class Trainer:
                     self.get_grid_flat_normal(outputs, n_pts_dict)
                 
 
-                if self.opt.save_pcd_intv != 0 and self.step % self.opt.save_pcd_intv == 0: ## ZMH: comment this line for memory leak debug! 
+                if self.opt.save_pcd_intv != 0 and self.step % self.opt.save_pcd_intv == 0 and self.run_mode in self.opt.save_pcd_pic_mode: ## ZMH: comment this line for memory leak debug! 
                     self.save_pcd(outputs, n_pts_dict)
 
                 innerps, dists, coss = self.get_innerp_from_grid_flat(inputs, outputs, n_pts_dict)
@@ -2722,11 +2750,17 @@ class Trainer:
     def log(self, mode, inputs, outputs, losses):
         """Write an event to the tensorboard events file
         """
+
+        if self.opt.val_set_only:
+            step = self.weight_n
+        else:
+            step = self.step
+
         if self.writers is None:
             return
         writer = self.writers[mode]
         for l, v in losses.items():
-            writer.add_scalar("{}".format(l), v, self.step)
+            writer.add_scalar("{}".format(l), v, step)
 
         if mode == "val_set":
             return
@@ -2737,53 +2771,54 @@ class Trainer:
                     if frame_id == 0: ## added by ZMH
                         writer.add_image(
                             "color_{}_{}/{}".format(frame_id, s, j),
-                            inputs[("color", frame_id, s)][j].data, self.step)
+                            inputs[("color", frame_id, s)][j].data, step)
                         if s == 0 and frame_id != 0:
                             writer.add_image(
                                 "color_pred_{}_{}/{}".format(frame_id, s, j),
-                                outputs[("color", frame_id, s)][j].data, self.step)
+                                outputs[("color", frame_id, s)][j].data, step)
 
                 writer.add_image(
                     "disp_{}/{}".format(s, j),
-                    normalize_image(outputs[("disp", s)][j]), self.step)
+                    normalize_image(outputs[("disp", s)][j]), step)
 
                 # if s == 0:
                     # print('shape 1', outputs[("disp", s)][j].shape)
-                disp = depth_to_disp(inputs[("depth_gt_scale", 0, s)][j], self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
+                # disp = depth_to_disp(inputs[("depth_gt_scale", 0, s)][j], self.opt.min_depth, self.opt.max_depth, self.opt.ref_depth, self.opt.depth_ref_mode)
+                disp = inputs[("disp_gt_scale", 0, s)][j]
                 # disp = disp.squeeze(1)
                 # print('shape 2', disp.shape)
                 writer.add_image(
                     "disp_{}/gt_{}".format(s, j),
-                    normalize_image(disp), self.step)
+                    normalize_image(disp), step)
 
                 writer.add_image(
                     "disp_{}/mask_{}".format(s, j),
-                    inputs[("depth_mask", 0, s)][j], self.step)
+                    inputs[("depth_mask", 0, s)][j], step)
 
                 if self.opt.mask_samp_as_lidar:
                     writer.add_image(
                         "disp_{}/masksp_{}".format(s, j),
-                        inputs[("depth_mask_sp", 0, s)][j], self.step)
+                        inputs[("depth_mask_sp", 0, s)][j], step)
                     writer.add_image(
                         "disp_{}/maskgtsp_{}".format(s, j),
-                        inputs[("depth_mask_gt_sp", 0, s)][j], self.step)
+                        inputs[("depth_mask_gt_sp", 0, s)][j], step)
 
                 if self.opt.use_normal or self.opt.use_normal_v2 or self.opt.use_normal_v3:
                     writer.add_image(
                         "normal_{}/dir_{}".format(s, j),
-                        outputs[("grid_normal_vis", 0, s, 0, False)][j], self.step)
+                        outputs[("grid_normal_vis", 0, s, 0, False)][j], step)
                     writer.add_image(
                         "normal_{}/res_{}".format(s, j),
-                        outputs[("grid_nres", 0, s, 0, False)][j], self.step)
-                        # normalize_image(outputs[("grid_nres", 0, s, 0, False)][j]), self.step)
+                        outputs[("grid_nres", 0, s, 0, False)][j], step)
+                        # normalize_image(outputs[("grid_nres", 0, s, 0, False)][j]), step)
 
                     writer.add_image(
                         "normal_{}/dir_gt_{}".format(s, j),
-                        outputs[("grid_normal_vis", 0, s, 0, True)][j], self.step)
+                        outputs[("grid_normal_vis", 0, s, 0, True)][j], step)
                     writer.add_image(
                         "normal_{}/res_gt_{}".format(s, j),
-                        outputs[("grid_nres", 0, s, 0, True)][j], self.step)
-                        # normalize_image(outputs[("grid_nres", 0, s, 0, True)][j]), self.step)
+                        outputs[("grid_nres", 0, s, 0, True)][j], step)
+                        # normalize_image(outputs[("grid_nres", 0, s, 0, True)][j]), step)
                 
 
                 if self.opt.predictive_mask:
@@ -2791,13 +2826,13 @@ class Trainer:
                         writer.add_image(
                             "predictive_mask_{}_{}/{}".format(frame_id, s, j),
                             outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...],
-                            self.step)
+                            step)
 
                 elif not self.opt.disable_automasking:
                     if s == 0: ## added by ZMH
                         writer.add_image(
                             "automask_{}/{}".format(s, j),
-                            outputs["identity_selection/{}".format(s)][j][None, ...], self.step)
+                            outputs["identity_selection/{}".format(s)][j][None, ...], step)
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with

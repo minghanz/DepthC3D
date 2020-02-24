@@ -19,8 +19,9 @@ def error_disp(disp, gt_depth, opt):
         scaled_disp = cv2.resize(scaled_disp, (gt_width, gt_height))
         pred_depth = 1 / scaled_disp
     else:
-        scaled_disp = cv2.resize(disp, (gt_width, gt_height))
         _, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth, opt.ref_depth, opt.depth_ref_mode)
+        pred_depth = pred_depth.cpu()[0, 0].numpy()
+        pred_depth = cv2.resize(pred_depth, (gt_width, gt_height))
 
     losses = compute_depth_losses(gt_depth, pred_depth, depth_metric_names, opt)
 
@@ -84,7 +85,8 @@ def compute_errors(gt, pred):
 
     abs_rel = np.mean(np.abs(gt - pred) / gt)
 
-    sq_rel = np.mean(((gt - pred) ** 2) / (gt**2))
+    # sq_rel = np.mean(((gt - pred) ** 2) / (gt**2))
+    sq_rel = np.mean(((gt - pred) ** 2) / gt)
 
     d = np.log(pred) - np.log(gt)
     d2 = d ** 2

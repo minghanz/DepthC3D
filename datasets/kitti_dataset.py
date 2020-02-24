@@ -130,7 +130,11 @@ class VKITTIDataset(MonoDataset):
         frame_index = int(line[1])
         side = line[2]
 
-        velo_filename = self.get_depth_path(scene_name, frame_index, side)
+        f_str = "depth_{:05d}.png".format(frame_index)
+        velo_filename = os.path.join(
+            self.data_path, scene_name, "clone", "frames", "depth", "Camera_0", f_str)
+
+        # velo_filename = self.get_depth_path(scene_name, frame_index, side)
         
         return os.path.isfile(velo_filename)
 
@@ -159,9 +163,9 @@ class VKITTIDataset(MonoDataset):
         depth = depth.astype(np.float32) / 100
         depth[depth>500] = 0
         if do_flip:
-            depth_gt = np.fliplr(depth_gt)
+            depth = np.fliplr(depth)
 
-        return depth_gt
+        return depth
 
     def get_depth_related(self, folder, frame_index, side, do_flip, inputs):
         """
