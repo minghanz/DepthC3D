@@ -1,1 +1,1 @@
-from .kitti_dataset import KITTIRAWDataset, KITTIOdomDataset, KITTIDepthDataset, TUMRGBDDataset, LyftDataset, VKITTIDataset
+from .kitti_dataset import KITTIRAWDataset, KITTIOdomDataset, KITTIDepthDataset, TUMRGBDDataset, LyftDataset, VKITTIDataset, KITTIFilledDepthDataset

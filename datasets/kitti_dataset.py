@@ -549,3 +549,41 @@ class KITTIDepthDataset(KITTIDataset):
 
             depth_gt = np.expand_dims(inputs[("depth_gt_scale", i, -1)], 0)
             inputs[("depth_gt_scale", i, -1)] = torch.from_numpy(depth_gt.astype(np.float32))
+
+class KITTIFilledDepthDataset(KITTIDepthDataset):
+    """KITTI dataset which uses the filled depth by NYUv2 colorization tool based on raw Lidar projection
+    """
+    def __init__(self, *args, **kwargs):
+        super(KITTIFilledDepthDataset, self).__init__(*args, **kwargs)
+
+    def get_depth(self, folder, frame_index, side, do_flip):
+        f_str = "{:010d}.png".format(frame_index)
+        depth_path = os.path.join(
+            self.data_path,
+            folder,
+            "filled_depth_0{}/data".format(self.side_map[side]),
+            f_str)
+
+        calib_path = os.path.join(self.data_path, folder.split("/")[0])
+
+        # depth_gt = pil.open(depth_path) # ZMH: moved into generate_depth_map
+        depth_gt, P_rect_norm, im_shape  = generate_depth_map(calib_path, depth_path, self.side_map[side], vel_depth=True)
+        depth_gt = depth_gt.resize(self.full_res_shape, pil.NEAREST)
+        depth_gt = np.array(depth_gt).astype(np.float32) / 256
+
+        if do_flip:
+            depth_gt = np.fliplr(depth_gt)
+
+        return depth_gt, P_rect_norm
+
+    # def check_depth(self):
+    #     line = self.filenames[0].split()
+    #     scene_name = line[0]
+    #     frame_index = int(line[1])
+
+    #     velo_filename = os.path.join(
+    #         self.data_path,
+    #         scene_name,
+    #         "velodyne_points/data/{:010d}.bin".format(int(frame_index)))
+
+    #     return os.path.isfile(velo_filename)

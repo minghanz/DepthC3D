@@ -186,21 +186,24 @@ class Trainer:
                          "kitti_depth": datasets.KITTIDepthDataset, 
                          "TUM": datasets.TUMRGBDDataset, 
                          "lyft_1024": datasets.LyftDataset, 
-                         "vkitti": datasets.VKITTIDataset} # ZMH: kitti_depth originally not shown as an option here
+                         "vkitti": datasets.VKITTIDataset, 
+                         "kitti_filled_depth": datasets.KITTIFilledDepthDataset} # ZMH: kitti_depth originally not shown as an option here
         if self.opt.server == "mcity":
-            datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
+            datapath_dict = {"kitti": "/mnt/storage8t/minghanz/Datasets/KITTI_data/kitti_data",
                             "kitti_odom": None, 
                             "kitti_depth": os.path.join(script_path, "kitti_data"), 
                             "TUM": None, 
                             "lyft_1024": "/mnt/storage8t/minghanz/Datasets/lyft_kitti_seq/train", 
-                            "vkitti": "/mnt/storage8t/minghanz/Datasets/vKITTI2"}
+                            "vkitti": "/mnt/storage8t/minghanz/Datasets/vKITTI2", 
+                            "kitti_filled_depth": "/mnt/storage8t/minghanz/Datasets/KITTI_data/kitti_data"}
         elif self.opt.server == "sunny":
             datapath_dict = {"kitti": "/media/sda1/minghanz/datasets/kitti/kitti_data",
                             "kitti_odom": None, 
                             "kitti_depth": "/media/sda1/minghanz/datasets/kitti/kitti_data", 
                             "TUM": None, 
                             "lyft_1024": "/media/sda1/minghanz/datasets/lyft_kitti/train", 
-                            "vkitti": None}
+                            "vkitti": None, 
+                            "kitti_filled_depth": "/media/sda1/minghanz/datasets/kitti/kitti_data"}
                             #  "lyft_1024": os.path.join(script_path, "data_download/train")} # ZMH: kitti_depth originally not shown as an option here
         elif self.opt.server == "home":
             datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
@@ -208,24 +211,28 @@ class Trainer:
                             "kitti_depth": os.path.join(script_path, "kitti_data"), 
                             "TUM": None, 
                             "lyft_1024": None, 
-                            "vkitti": None}
+                            "vkitti": None, 
+                            "kitti_filled_depth": os.path.join(script_path, "kitti_data")}
         else:
             raise ValueError("server {} not recognized.".format(self.opt.server))
         splitfile_dict = {"kitti": "{}_files.txt",
                          "kitti_odom": None, 
                          "kitti_depth": "{}_files.txt", 
                          "TUM": None, 
-                         "lyft_1024": "samp_1024_{}_files.txt"} # ZMH: kitti_depth originally not shown as an option here
+                         "lyft_1024": "samp_1024_{}_files.txt", 
+                         "kitti_filled_depth": "{}_files.txt"} # ZMH: kitti_depth originally not shown as an option here
         self.width_dict = {"kitti": 640,
                          "kitti_odom": None, 
                          "kitti_depth": 640, 
                          "TUM": None, 
-                         "lyft_1024": 512} # ZMH: kitti_depth originally not shown as an option here
+                         "lyft_1024": 512, 
+                         "kitti_filled_depth": 640} # ZMH: kitti_depth originally not shown as an option here
         self.height_dict = {"kitti": 192,
                          "kitti_odom": None, 
                          "kitti_depth": 192, 
                          "TUM": None, 
-                         "lyft_1024": 224} # ZMH: kitti_depth originally not shown as an option here # change lyft height from 256 to 192 to 224
+                         "lyft_1024": 224, 
+                         "kitti_filled_depth": 192} # ZMH: kitti_depth originally not shown as an option here # change lyft height from 256 to 192 to 224
         self.full_res_shape = {}
         n_datasets_train = len(self.opt.dataset)
         n_datasets_val = len(self.opt.dataset_val)
@@ -502,9 +509,12 @@ class Trainer:
         print("Training")
         self.set_train()
 
+        self.cur_timing_step = self.step
+        self.before_op_time = time.time()
+
         for self.batch_idx, inputs in enumerate(self.train_loader):
 
-            before_op_time = time.time()
+            # before_op_time = time.time()
             # if self.batch_idx < 20000:
             #     self.geo_scale = 1
             # elif self.batch_idx < 40000:
@@ -549,14 +559,18 @@ class Trainer:
             loss.backward()
 
 
-            duration = time.time() - before_op_time
-
             # log less frequently after the first 2000 steps to save time & disk space
             early_phase = self.batch_idx % self.opt.log_frequency == 0 and self.step < 2000
             late_phase = self.step % 2000 == 0
 
             if early_phase or late_phase:
+                cur_time = time.time()
+                duration = cur_time - self.before_op_time
+
                 self.log_time(self.batch_idx, duration, losses["loss"].cpu().data)
+
+                self.cur_timing_step = self.step
+                self.before_op_time = cur_time
 
                 if "depth_gt" in inputs:
                     self.compute_depth_losses(inputs, outputs, losses)
@@ -571,10 +585,10 @@ class Trainer:
 
             ## ZMH: monitor GPU usage:
             if early_phase or late_phase:
-                allo = torch.cuda.memory_allocated()/1024/1024
-                cach = torch.cuda.memory_cached()/1024/1024
-                max_allo = torch.cuda.max_memory_allocated()/1024/1024
-                max_cach = torch.cuda.max_memory_cached()/1024/1024
+                allo = torch.cuda.memory_allocated(self.device)/1024/1024
+                cach = torch.cuda.memory_cached(self.device)/1024/1024
+                max_allo = torch.cuda.max_memory_allocated(self.device)/1024/1024
+                max_cach = torch.cuda.max_memory_cached(self.device)/1024/1024
 
                 print("GPU memory allocated at the end of iter {}: cur: {:.1f}, {:.1f}; max: {:.1f}, {:.1f}".format(self.step-1, allo, cach, \
                                                                                                                 max_allo, max_cach ))
@@ -587,8 +601,8 @@ class Trainer:
                     self.writers["train"].add_scalar("Mem/max_cach", max_cach, self.step-1)
                     
                 # torch.cuda.reset_peak_stats()
-                torch.cuda.reset_max_memory_cached()
-                torch.cuda.reset_max_memory_allocated()
+                torch.cuda.reset_max_memory_cached(self.device)
+                torch.cuda.reset_max_memory_allocated(self.device)
             # for obj in gc.get_objects():
             #     try:
             #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
@@ -2742,8 +2756,11 @@ class Trainer:
     def log_time(self, batch_idx, duration, loss):
         """Print a logging statement to the terminal
         """
-        samples_per_sec = self.opt.batch_size / duration
+        samples_per_sec = (self.step - self.cur_timing_step) * self.opt.batch_size / duration
+        # samples_per_sec = self.opt.batch_size / duration
+
         time_sofar = time.time() - self.start_time
+
         training_time_left = (
             self.num_total_steps / self.step - 1.0) * time_sofar if self.step > 0 else 0
         print_string = "epoch {:>3} | batch {:>6} | examples/s: {:5.1f}" + \
