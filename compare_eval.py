@@ -21,20 +21,22 @@ import networks
 import PIL.Image as pil
 from kitti_utils import generate_depth_map_original, generate_depth_map, project_lidar_to_img
 import numpy as np
+import cv2
+from layers import depth_to_disp
 
 splits_dir = os.path.join(os.path.dirname(__file__), "splits")
 split_file = "test_files.txt"
 
 ## GT depth
-def gt_depth_from_line(line, opt, mode="train"):
+def gt_depth_from_line(line, opt, data_path, mode="train"):
     folder, frame_id, side = line.split()
     frame_id = int(frame_id)
     if mode == "train":
         im_shape_predefined = [375, 1242]
 
     if opt.eval_split == "eigen":
-        calib_dir = os.path.join(opt.data_path, folder.split("/")[0])
-        velo_filename = os.path.join(opt.data_path, folder,
+        calib_dir = os.path.join(data_path, folder.split("/")[0])
+        velo_filename = os.path.join(data_path, folder,
                                         "velodyne_points/data", "{:010d}.bin".format(frame_id))
         if mode == "train":
             velo_rect, P_rect_norm, im_shape  = generate_depth_map(calib_dir, velo_filename, 2)
@@ -50,11 +52,11 @@ def gt_depth_from_line(line, opt, mode="train"):
     elif opt.eval_split == "eigen_benchmark":
         # gt_depth_path = os.path.join(opt.data_path, folder, "proj_depth",
         #                              "groundtruth", "image_02", "{:010d}.png".format(frame_id))
-        gt_depth_path = os.path.join(opt.data_path, folder, "proj_depth",
+        gt_depth_path = os.path.join(data_path, folder, "proj_depth",
                                         "groundtruth", "image_02", "{:010d}.png".format(frame_id), 'val', folder.split("/")[1], "proj_depth",
                                         "groundtruth", "image_02", "{:010d}.png".format(frame_id))
         if not os.path.exists(gt_depth_path):
-            gt_depth_path = os.path.join(opt.data_path, folder, "proj_depth",
+            gt_depth_path = os.path.join(data_path, folder, "proj_depth",
                                         "groundtruth", "image_02", "{:010d}.png".format(frame_id), 'train', folder.split("/")[1], "proj_depth",
                                         "groundtruth", "image_02", "{:010d}.png".format(frame_id))
             if not os.path.exists(gt_depth_path):
@@ -70,10 +72,26 @@ def gt_depth_from_line(line, opt, mode="train"):
             gt_depth = np.expand_dims(gt_depth, 0)
             gt_depth = torch.from_numpy(gt_depth.astype(np.float32)) # input original scale
     
+    elif opt.eval_split == "vkitti":
+        f_str = "depth_{:05d}.png".format(frame_id)
+        gt_depth_path = os.path.join(data_path, folder, "clone", "frames", "depth", "Camera_0", f_str)
+        gt_depth = cv2.imread(gt_depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        gt_depth = gt_depth.astype(np.float32) / 100
+        gt_depth[gt_depth>80] = 0
+        height = gt_depth.shape[0]
+        gt_depth[:int(height/2)] = 0
+        # print(gt_depth.max(), gt_depth.min())
+        if mode == "train":
+            gt_depth = np.expand_dims(gt_depth, 0)
+            gt_depth = np.expand_dims(gt_depth, 0)
+            gt_depth = torch.from_numpy(gt_depth.astype(np.float32))
+    else:
+        raise ValueError("opt.eval_split {} not recognized".format(opt.eval_split))
+
     return gt_depth
 
 ## network -> disp
-def network_define(opt):
+def network_define(opt, data_path, height, width):
     opt.load_weights_folder = os.path.expanduser(opt.load_weights_folder)
 
     assert os.path.isdir(opt.load_weights_folder), \
@@ -86,10 +104,15 @@ def network_define(opt):
     decoder_path = os.path.join(opt.load_weights_folder, "depth.pth")
 
     encoder_dict = torch.load(encoder_path, map_location=torch.device("cuda:0"))
-
-    dataset = datasets.KITTIRAWDataset(opt.data_path, filenames,
-                                        encoder_dict['height'], encoder_dict['width'],
-                                        [0], 4, is_train=False)
+        
+    if opt.dataset_val[0] == "kitti":
+        dataset = datasets.KITTIRAWDataset(data_path, filenames,
+                                            height, width,
+                                            [0], 4, is_train=False)
+    elif opt.dataset_val[0] == "vkitti":
+        dataset = datasets.VKITTIDataset(
+                    data_path, filenames, height, width,
+                    [0], 4, is_train=False)
     # dataloader = DataLoader(dataset, 16, shuffle=False, num_workers=opt.num_workers,
     #                         pin_memory=True, drop_last=False)
     dataloader = DataLoader(dataset, 1, shuffle=False, num_workers=opt.num_workers,
@@ -116,8 +139,51 @@ def main():
     
     opts, rest = options.parse()
 
+    if opts.server == "mcity":
+        datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
+                        "kitti_odom": None, 
+                        "kitti_depth": os.path.join(script_path, "kitti_data"), 
+                        "TUM": None, 
+                        "lyft_1024": "/mnt/storage8t/minghanz/Datasets/lyft_kitti_seq/train"}
+    elif opts.server == "sunny":
+        datapath_dict = {"kitti": "/media/sda1/minghanz/datasets/kitti/kitti_data",
+                        "kitti_odom": None, 
+                        "kitti_depth": "/media/sda1/minghanz/datasets/kitti/kitti_data", 
+                        "TUM": None, 
+                        "lyft_1024": "/media/sda1/minghanz/datasets/lyft_kitti/train", 
+                        "vkitti": "/media/sda1/minghanz/datasets/vkitti2"}
+                        #  "lyft_1024": os.path.join(script_path, "data_download/train")} # ZMH: kitti_depth originally not shown as an option here
+    elif opts.server == "home":
+        datapath_dict = {"kitti": os.path.join(script_path, "kitti_data"),
+                        "kitti_odom": None, 
+                        "kitti_depth": os.path.join(script_path, "kitti_data"), 
+                        "TUM": None, 
+                        "lyft_1024": None}
+    else:
+        raise ValueError("server {} not recognized.".format(opts.server))
+
+    width_dict = {"kitti": 640,
+                        "kitti_odom": None, 
+                        "kitti_depth": 640, 
+                        "TUM": None, 
+                        "lyft_1024": 512, 
+                        "vkitti": 640} # ZMH: kitti_depth originally not shown as an option here
+    height_dict = {"kitti": 192,
+                        "kitti_odom": None, 
+                        "kitti_depth": 192, 
+                        "TUM": None, 
+                        "lyft_1024": 224, 
+                        "vkitti": 192} # ZMH: kitti_depth originally not shown as an option here # change lyft height from 256 to 192 to 224
+
+    # data_path = datapath_dict["kitti"]
+    # width = width_dict["kitti"]
+    # height = height_dict["kitti"]
+    data_path = datapath_dict[opts.dataset_val[0]]
+    width = width_dict[opts.dataset_val[0]]
+    height = height_dict[opts.dataset_val[0]]
+
     if opts.ext_disp_to_eval is None:
-        encoder, depth_decoder, dataloader, filenames = network_define(opts)
+        encoder, depth_decoder, dataloader, filenames = network_define(opts, data_path, height, width)
 
         if opts.save_pred_disps:
             output_path = os.path.join(
@@ -144,14 +210,36 @@ def main():
                 output = depth_decoder(encoder(input_color))
                 disp = output[("disp", 0)]
 
+                disp_np = disp.cpu().numpy()
+
                 if opts.save_pred_disps:
-                    disps.append(disp.cpu().numpy())
+                    disps.append(disp_np)
                 
                 line = filenames[i]
-                gt_depth_train = gt_depth_from_line(line, opts, mode="train").cuda(0)
-                gt_depth_eval = gt_depth_from_line(line, opts, mode="eval")
+                gt_depth_train = gt_depth_from_line(line, opts, data_path, mode="train").cuda(0)
+                gt_depth_eval = gt_depth_from_line(line, opts, data_path, mode="eval")
 
-                loss_train = err_train.error_disp(disp, gt_depth_train, opts)
+                # ## visualize to check the process is correct, can also be used for qualitative analysis (VKITTI2)
+                # if i == 0:
+                #     disp_im = (disp_np[0,0,:,:]*255).astype(np.uint8)
+                #     # print(disp_np.shape, disp_np.max(), disp_np.min())
+                #     img = pil.fromarray(disp_im, mode="L")
+                #     img.save(os.path.join(opts.load_weights_folder, "{}.png".format(i)))
+                    
+                #     gt_disp = depth_to_disp(gt_depth_train, opts.min_depth, opts.max_depth, opts.ref_depth, opts.depth_ref_mode )
+                #     disp_np = gt_disp.cpu().numpy()
+                #     disp_im = (disp_np[0,0,:,:]*255).astype(np.uint8)
+                #     # print(disp_np.shape, disp_np.max(), disp_np.min())
+                #     img = pil.fromarray(disp_im, mode="L")
+                #     img.save(os.path.join(opts.load_weights_folder, "{}_gt.png".format(i)))
+
+                #     rgb = input_color.cpu().detach().numpy().transpose(0,2,3,1)
+                #     rgb = (rgb*255).astype(np.uint8)
+                #     rgb_im = pil.fromarray(rgb[0], mode="RGB")
+                #     rgb_im.save(os.path.join(opts.load_weights_folder, "{}_rgb.png".format(i)))
+
+
+                loss_train = err_train.error_disp(disp, gt_depth_train, opts, height, width)
                 loss_eval = err_eval.error_disp(disp, gt_depth_eval, opts)
 
                 for item in depth_metric_names:
@@ -168,13 +256,20 @@ def main():
     
     else:
         for i, disp in enumerate(disps):
+            # ## visualize to check the process is correct, can also be used for qualitative analysis (VKITTI2)
+            # if i == 0:
+            #     disp_im = (disp[0,0,:,:]*255).astype(np.uint8)
+            #     print(disp_im.shape, disp_im.max(), disp_im.min())
+            #     img = pil.fromarray(disp_im, mode="L")
+            #     img.save(os.path.join(opts.load_weights_folder, "{}.png".format(i)))
+
             disp = torch.from_numpy(disp).to(device="cuda:0", dtype=torch.float32)
 
             line = filenames[i]
-            gt_depth_train = gt_depth_from_line(line, opts, mode="train").cuda(0)
-            gt_depth_eval = gt_depth_from_line(line, opts, mode="eval")
+            gt_depth_train = gt_depth_from_line(line, opts, data_path, mode="train").cuda(0)
+            gt_depth_eval = gt_depth_from_line(line, opts, data_path, mode="eval")
 
-            loss_train = err_train.error_disp(disp, gt_depth_train, opts)
+            loss_train = err_train.error_disp(disp, gt_depth_train, opts, height, width)
             loss_eval = err_eval.error_disp(disp, gt_depth_eval, opts)
 
             for item in depth_metric_names:

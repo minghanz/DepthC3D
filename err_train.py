@@ -11,12 +11,12 @@ from compare_eval import depth_metric_names
 
 import err_eval
 
-def error_disp(disp, gt_depth, opt):
+def error_disp(disp, gt_depth, opt, height, width):
     """The version used in training
     resize-scale-inverse-resize
     """
     disp = F.interpolate(
-                disp, [opt.height, opt.width], mode="bilinear", align_corners=False)
+                disp, [height, width], mode="bilinear", align_corners=False)
 
     # gt_height, gt_width = gt_depth.shape[2:]
     # disp = F.interpolate(
@@ -123,7 +123,8 @@ def compute_depth_errors(gt, pred):
 
     abs_rel = torch.mean(torch.abs(gt - pred) / gt)
 
-    sq_rel = torch.mean((gt - pred) ** 2 / (gt**2))
+    # sq_rel = torch.mean((gt - pred) ** 2 / (gt**2))
+    sq_rel = torch.mean((gt - pred) ** 2 / gt )
 
     d = torch.log(pred) - torch.log(gt)
     d2 = d ** 2

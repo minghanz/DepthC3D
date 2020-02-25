@@ -341,8 +341,9 @@ def save_tensor_to_img(tsor, filename, mode):
     if mode =="rgb":
         nparray = (nparray * 255).astype(np.uint8)
         Imode = "RGB"
-    elif mode == "dep":
+    elif "dep" in mode:
         nparray = (nparray[:,:,:,0] /nparray.max() * 255).astype(np.uint8)
+        # nparray = (nparray[:,:,:,0] * 255).astype(np.uint8) # disable normalization since disp is already in [0, 1]
         Imode = "L"
     elif "nml" in mode:
         nparray = (nparray * 255).astype(np.uint8)

@@ -59,13 +59,13 @@ class MonodepthOptions:
                                  nargs="+", 
                                  help="dataset to train on",
                                  default="kitti",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM", "lyft_1024"])
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM", "lyft_1024", "vkitti"])
         self.parser.add_argument("--dataset_val",
                                  type=str,
                                  nargs="+", 
                                  help="dataset to evaluate on",
                                  default="kitti",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM", "lyft_1024"]) # ZMH: this option added by me
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "TUM", "lyft_1024", "vkitti"]) # ZMH: this option added by me
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")
@@ -267,6 +267,12 @@ class MonodepthOptions:
                                  type=int,
                                  help="interval between two image-saving iteration. Disabled if set to 0.",
                                  default=4000)
+        self.parser.add_argument("--save_pcd_pic_mode",
+                                 nargs="+",
+                                 type=str,
+                                 help="decide in which mode save pic/pcd files, to avoid train/val/val_set mixed up",
+                                 default="train", 
+                                 choices=["train", "val", "val_set"])
         self.parser.add_argument("--config_file",
                                  type=str,
                                  help="to load options from file")
@@ -325,7 +331,7 @@ class MonodepthOptions:
                                  type=str,
                                  default="eigen",
                                  choices=[
-                                    "eigen", "eigen_benchmark", "benchmark", "odom_9", "odom_10"],
+                                    "eigen", "eigen_benchmark", "benchmark", "odom_9", "odom_10", "vkitti"],
                                  help="which split to run eval on")
         self.parser.add_argument("--save_pred_disps",
                                  help="if set saves predicted disparities",
