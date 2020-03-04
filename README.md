@@ -1,3 +1,11 @@
+# Monocular Depth Prediction Through Continuous 3D Loss
+
+This is the official implementation of the paper: **Monocular Depth Prediction Through Continuous 3D Loss**. 
+
+This repo is currently under heavy construction. 
+
+Below is the readme information of the work **Monodepth2**, which the coding of this work is based on. 
+ 
 # Monodepth2
 
 This is the reference PyTorch implementation for training and testing depth estimation models using the method described in
