@@ -9,7 +9,7 @@ if __name__ == "__main__":
 
     if server == "sunny":
         data_root = "/media/sda1/minghanz/datasets/kitti/kitti_fill_depth"
-        zip_name = "/media/sda1/minghanz/datasets/kitti/kitti_fill_depth_chunk0.zip"
+        zip_name = "/media/sda1/minghanz/datasets/kitti/kitti_fill_depth_chunk3.zip"
         split_file = "/root/repos/monodepth2/splits/eigen_zhou/train_files.txt"
     elif server == "mcity":
         data_root = "/mnt/storage8t/minghanz/Datasets/KITTI_fill_depth"
@@ -24,6 +24,29 @@ if __name__ == "__main__":
 
     with open(split_file) as f:
         lines = f.readlines()
+
+    ### Find not processed items in adjacent frames
+    not_found_lines = []
+    n_nfound_lines = 0
+    for line in lines:
+        words = line.split()
+        folder = words[0]
+        frame_id = int(words[1])
+        side = words[2]
+
+        for frame_idx in range(frame_id-1, frame_id+2):
+            query_line = "{} {} {}\n".format(folder, frame_idx, side)
+            if query_line not in lines:
+                # print(query_line, end="")
+                not_found_lines.append(query_line)
+                n_nfound_lines += 1
+    
+    print(n_nfound_lines)
+
+    not_found_lines_set = set(not_found_lines)
+    not_found_lines = list(not_found_lines_set)
+    print(len(not_found_lines))
+    ###################################################
 
     ################ create zip file
     # n_lines = len(lines)
@@ -44,44 +67,25 @@ if __name__ == "__main__":
     #     end = n_lines
     #     lines_trunk = lines[start:end]
 
-    # zip_save = zipfile.ZipFile(zip_name, "w")
+    zip_save = zipfile.ZipFile(zip_name, "w")
 
     # for line in tqdm(lines_trunk):
-    #     words = line.split()
-    #     folder = words[0]
-    #     frame_id = int(words[1])
-    #     side = words[2]
-
-    #     for subfolder in ["unfilled_depth_0{}/data".format(side_map[side]), "filled_depth_0{}/data".format(side_map[side])]:
-    #         depth_gt_path = os.path.join(
-    #             data_root,
-    #             folder,
-    #             subfolder, 
-    #             "{:010d}.png".format(frame_id))
-    #         zip_save.write(depth_gt_path, os.path.relpath(depth_gt_path, data_root), compress_type=zipfile.ZIP_DEFLATED)
-
-    # zip_save.close()
-    #########################################
-
-    ### Find not processed items in adjacent frames
-    not_found_lines = []
-    n_nfound_lines = 0
-    for line in lines:
+    for line in tqdm(not_found_lines):
         words = line.split()
         folder = words[0]
         frame_id = int(words[1])
         side = words[2]
 
-        for frame_idx in range(frame_id-1, frame_id+2):
-            query_line = "{} {} {}\n".format(folder, frame_idx, side)
-            if query_line not in lines:
-                print(query_line, end="")
-                not_found_lines.append(query_line)
-                n_nfound_lines += 1
-    
-    print(n_nfound_lines)
-    ###################################################
+        for subfolder in ["unfilled_depth_0{}/data".format(side_map[side]), "filled_depth_0{}/data".format(side_map[side])]:
+            depth_gt_path = os.path.join(
+                data_root,
+                folder,
+                subfolder, 
+                "{:010d}.png".format(frame_id))
+            zip_save.write(depth_gt_path, os.path.relpath(depth_gt_path, data_root), compress_type=zipfile.ZIP_DEFLATED)
 
+    zip_save.close()
+    #########################################
 
 
     ################ find corrupted files

@@ -103,7 +103,7 @@ def network_define(opt, data_path, height, width):
     encoder_path = os.path.join(opt.load_weights_folder, "encoder.pth")
     decoder_path = os.path.join(opt.load_weights_folder, "depth.pth")
 
-    encoder_dict = torch.load(encoder_path, map_location=torch.device("cuda:0"))
+    encoder_dict = torch.load(encoder_path, map_location=torch.device("cuda:1"))
         
     if opt.dataset_val[0] == "kitti":
         dataset = datasets.KITTIRAWDataset(data_path, filenames,
@@ -123,11 +123,11 @@ def network_define(opt, data_path, height, width):
 
     model_dict = encoder.state_dict()
     encoder.load_state_dict({k: v for k, v in encoder_dict.items() if k in model_dict})
-    depth_decoder.load_state_dict(torch.load(decoder_path, map_location=torch.device("cuda:0")))
+    depth_decoder.load_state_dict(torch.load(decoder_path, map_location=torch.device("cuda:1")))
 
-    encoder.cuda(0)
+    encoder.cuda(1)
     encoder.eval()
-    depth_decoder.cuda(0)
+    depth_decoder.cuda(1)
     depth_decoder.eval()
 
     return encoder, depth_decoder, dataloader, filenames
@@ -206,7 +206,7 @@ def main():
     if opts.ext_disp_to_eval is None:
         with torch.no_grad():
             for i, data in enumerate(dataloader):
-                input_color = data[("color", 0, 0)].cuda(0)
+                input_color = data[("color", 0, 0)].cuda(1)
                 output = depth_decoder(encoder(input_color))
                 disp = output[("disp", 0)]
 
@@ -216,7 +216,7 @@ def main():
                     disps.append(disp_np)
                 
                 line = filenames[i]
-                gt_depth_train = gt_depth_from_line(line, opts, data_path, mode="train").cuda(0)
+                gt_depth_train = gt_depth_from_line(line, opts, data_path, mode="train").cuda(1)
                 gt_depth_eval = gt_depth_from_line(line, opts, data_path, mode="eval")
 
                 # ## visualize to check the process is correct, can also be used for qualitative analysis (VKITTI2)
@@ -263,14 +263,17 @@ def main():
             #     img = pil.fromarray(disp_im, mode="L")
             #     img.save(os.path.join(opts.load_weights_folder, "{}.png".format(i)))
 
-            disp = torch.from_numpy(disp).to(device="cuda:0", dtype=torch.float32)
+            disp = torch.from_numpy(disp).to(device="cuda:1", dtype=torch.float32)
+
+            if opts.ext_depth:
+                disp = disp.unsqueeze(0).unsqueeze(0)
 
             line = filenames[i]
-            gt_depth_train = gt_depth_from_line(line, opts, data_path, mode="train").cuda(0)
+            gt_depth_train = gt_depth_from_line(line, opts, data_path, mode="train").cuda(1)
             gt_depth_eval = gt_depth_from_line(line, opts, data_path, mode="eval")
 
-            loss_train = err_train.error_disp(disp, gt_depth_train, opts, height, width)
-            loss_eval = err_eval.error_disp(disp, gt_depth_eval, opts)
+            loss_train = err_train.error_disp(disp, gt_depth_train, opts, height, width, opts.ext_depth)
+            loss_eval = err_eval.error_disp(disp, gt_depth_eval, opts, opts.ext_depth)
 
             for item in depth_metric_names:
                 losses_train[item] += loss_train[item]

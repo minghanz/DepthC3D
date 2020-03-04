@@ -11,18 +11,22 @@ from compare_eval import depth_metric_names
 
 import err_eval
 
-def error_disp(disp, gt_depth, opt, height, width):
+def error_disp(disp, gt_depth, opt, height, width, use_depth=False):
     """The version used in training
     resize-scale-inverse-resize
     """
+    print(disp.shape)
     disp = F.interpolate(
                 disp, [height, width], mode="bilinear", align_corners=False)
 
-    # gt_height, gt_width = gt_depth.shape[2:]
-    # disp = F.interpolate(
-    #             disp, [gt_height, gt_width], mode="bilinear", align_corners=False)
+    if use_depth:
+        pred_depth = disp
+    else:
+        # gt_height, gt_width = gt_depth.shape[2:]
+        # disp = F.interpolate(
+        #             disp, [gt_height, gt_width], mode="bilinear", align_corners=False)
 
-    scaled_disp, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth, opt.ref_depth, opt.depth_ref_mode)
+        scaled_disp, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth, opt.ref_depth, opt.depth_ref_mode)
 
     ###################### switch to eval mode ##########################
     # pred_depth_np = pred_depth.cpu().numpy()[0,0]
@@ -54,8 +58,9 @@ def compute_depth_losses(depth_gt, depth_pred, depth_metric_names, opt):
     ### creating the mask
     mask = depth_gt > 0
 
-    if opt.eval_split == "eigen":
+    if opt.eval_split == "eigen" or opt.eval_split == "eigen_benchmark":
         # garg/eigen crop
+        # print("cropping")
         crop_mask = torch.zeros_like(mask)
         crop_mask[:, :, 153:371, 44:1197] = 1
 

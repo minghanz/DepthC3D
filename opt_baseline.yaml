@@ -3,7 +3,7 @@
 # system setup
 model_name: "mono_model_KITTI_Lidar"
 log_frequency: 100
-cuda_n: 1
+cuda_n: 0
 save_pic_intv: 0
 save_pcd_intv: 0
 server: "sunny"
@@ -14,14 +14,14 @@ batch_size: 4 # 2
 iters_per_update: 2 # 4
 scheduler_step_size: 10
 num_layers: 50
-num_workers: 0
+num_workers: 8
 
 # depth meta setup
 depth_in_loss: false
 disp_in_loss: true
-min_depth: 1.0
-ref_depth: 10
-depth_ref_mode: true
+min_depth: 2.0
+# ref_depth: 10
+# depth_ref_mode: true
 disparity_smoothness: 0.01
 
 # cvo meta setup

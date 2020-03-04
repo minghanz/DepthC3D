@@ -350,6 +350,9 @@ class MonodepthOptions:
                                  help="if set will perform the flipping post processing "
                                       "from the original monodepth paper",
                                  action="store_true")
+        self.parser.add_argument("--ext_depth",
+                                 help="if set use npy files with depth instead of disp in compare_eval.py",
+                                 action="store_true")
 
     def parse(self):
         self.options, rest = self.parser.parse_known_args()

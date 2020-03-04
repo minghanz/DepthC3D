@@ -6,22 +6,26 @@ import cv2
 from layers import disp_to_depth
 from compare_eval import depth_metric_names
 
-def error_disp(disp, gt_depth, opt):
+def error_disp(disp, gt_depth, opt, use_depth=False):
     """The version used in evaluate_depth.py
     scale-resize-inverse
     """
     gt_height, gt_width = gt_depth.shape[:2]
 
-    if not opt.depth_ref_mode:
-        scaled_disp, _ = disp_to_depth(disp, opt.min_depth, opt.max_depth)
-        scaled_disp = scaled_disp.cpu()[0, 0].numpy()
-        
-        scaled_disp = cv2.resize(scaled_disp, (gt_width, gt_height))
-        pred_depth = 1 / scaled_disp
-    else:
-        _, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth, opt.ref_depth, opt.depth_ref_mode)
-        pred_depth = pred_depth.cpu()[0, 0].numpy()
+    if use_depth:
+        pred_depth = disp.cpu()[0, 0].numpy()
         pred_depth = cv2.resize(pred_depth, (gt_width, gt_height))
+    else:
+        if not opt.depth_ref_mode:
+            scaled_disp, _ = disp_to_depth(disp, opt.min_depth, opt.max_depth)
+            scaled_disp = scaled_disp.cpu()[0, 0].numpy()
+            
+            scaled_disp = cv2.resize(scaled_disp, (gt_width, gt_height))
+            pred_depth = 1 / scaled_disp
+        else:
+            _, pred_depth = disp_to_depth(disp, opt.min_depth, opt.max_depth, opt.ref_depth, opt.depth_ref_mode)
+            pred_depth = pred_depth.cpu()[0, 0].numpy()
+            pred_depth = cv2.resize(pred_depth, (gt_width, gt_height))
 
     losses = compute_depth_losses(gt_depth, pred_depth, depth_metric_names, opt)
 
@@ -35,7 +39,8 @@ def compute_depth_losses(gt_depth, pred_depth, depth_metric_names, opt):
     losses = {}
 
     ### creating the mask
-    if opt.eval_split == "eigen":
+    if opt.eval_split == "eigen" or opt.eval_split == "eigen_benchmark":
+        # print("cropping")
         mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
 
         crop = np.array([0.40810811 * gt_height, 0.99189189 * gt_height,

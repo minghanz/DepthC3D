@@ -79,7 +79,9 @@ class PtSampleInGridWithNormal(Function):
         """ pts: B*2*N, pts_info: B*C*N, grid_source: B*C*H*W (C could be xyz, rgb, ...), grid_valid: B*1*H*W, neighbor_range: int
         """
         if not return_nkern:
-            y = cvo_dense_with_normal.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, ell_basedist)
+            # y = cvo_dense_with_normal.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, ell_basedist)
+            outputs = cvo_dense_with_normal_output.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, ell_basedist, return_nkern)
+            y = outputs[0]
         else:
             outputs = cvo_dense_with_normal_output.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, ell_basedist, return_nkern)
             y = outputs[0]
@@ -338,7 +340,7 @@ def save_tensor_to_img(tsor, filename, mode):
     """Input is B*C*H*W"""
     nparray = tsor.cpu().detach().numpy()
     nparray = nparray.transpose(0,2,3,1)
-    if mode =="rgb":
+    if "rgb" in mode:
         nparray = (nparray * 255).astype(np.uint8)
         Imode = "RGB"
     elif "dep" in mode:

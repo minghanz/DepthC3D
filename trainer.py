@@ -61,7 +61,9 @@ def my_collate_fn(batch):
     batch_new = {}
     for item in batch[0]:
         batch_new[item] = {}
-        if "velo_gt" not in item:
+        if "index" in item:
+            batch_new[item] = [batchi[item] for batchi in batch]
+        elif "velo_gt" not in item:
             batch_new[item] = torch.stack([batchi[item] for batchi in batch], 0)
         else:
             batch_new[item] = [batchi[item].unsqueeze(0) for batchi in batch]
@@ -808,7 +810,22 @@ class Trainer:
             if self.opt.val_set_only:
                 self.step = 0
 
+            # ## for writing a file of samples in the sequence of the iteration during training 
+            # f = open("/root/repos/monodepth2/splits/eigen_zhou/val_files.txt")
+            # lines = f.readlines()
+            # g = open("/root/repos/monodepth2/splits/eigen_zhou/val_files_samp.txt", "w")
+
             for batch_idx, inputs in enumerate(self.val_loader):
+                # ## for writing a file of samples in the sequence of the iteration during training 
+                # # print(inputs["index"])
+                # line0 = lines[inputs["index"][0]]
+                # line1 = lines[inputs["index"][1]]
+                # g.write(line0) 
+                # g.write(line1) 
+                # if batch_idx > 100:
+                #     break
+                # continue
+
                 outputs, losses = self.process_batch(inputs)
                 if "depth_gt" in inputs:
                     self.compute_depth_losses(inputs, outputs, losses)
@@ -825,6 +842,11 @@ class Trainer:
 
                 if self.opt.val_set_only:
                     self.step += 1
+
+            # ## for writing a file of samples in the sequence of the iteration during training 
+            # f.close()
+            # g.close()
+            # return
 
             val_end_time = time.time()
             print("Val time: {:.2f}".format(val_end_time - val_start_time) )
@@ -1522,6 +1544,8 @@ class Trainer:
         if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and self.run_mode in self.opt.save_pcd_pic_mode:
             filename = os.path.join(self.nkern_path, "{}".format(self.step) )
             save_tensor_to_img(inputs[("color", 0, 0)], filename, "rgb")
+            # save_tensor_to_img(inputs[("color", -1, 0)], filename, "rgb_prev")
+            # save_tensor_to_img(inputs[("color", 1, 0)], filename, "rgb_next")
             save_tensor_to_img(outputs[("disp", 0)], filename, "dep")
             save_tensor_to_img(inputs[("disp_gt_scale", 0, 0)], filename, "dep_gt")
             
@@ -1575,7 +1599,7 @@ class Trainer:
                         # inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
                         #     flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist)
                         
-                        if False: #self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and flat_idx == grid_idx and flat_idx == 0 and scale == 0 and self.run_mode in self.opt.save_pcd_pic_mode:
+                        if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and flat_idx == grid_idx and flat_idx == 0 and scale == 0 and self.run_mode in self.opt.save_pcd_pic_mode:
                             filename = os.path.join(self.nkern_path, "{}_{}_{}_{}_{}".format(self.step, flat_idx, scale, grid_idx, flat_gt ) )
                             filename_nkern = "{}_nkern".format(filename)
                             inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
