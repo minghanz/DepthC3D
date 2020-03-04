@@ -625,7 +625,9 @@ class Trainer:
         """Pass a minibatch through the network and generate images and losses
         """
         for key, ipt in inputs.items():
-            if "velo_gt" not in key:
+            if "index" in key:
+                continue
+            elif "velo_gt" not in key:
                 inputs[key] = ipt.to(self.device)
             else:
                 inputs[key] = [ipt_i.to(self.device) for ipt_i in ipt]
@@ -1603,10 +1605,10 @@ class Trainer:
                             filename = os.path.join(self.nkern_path, "{}_{}_{}_{}_{}".format(self.step, flat_idx, scale, grid_idx, flat_gt ) )
                             filename_nkern = "{}_nkern".format(filename)
                             inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
-                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist, True, filename_nkern)
+                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, True, self.opt.ell_basedist, True, filename_nkern)
                         else:
                             inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
-                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist, False, None)
+                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, True, self.opt.ell_basedist, False, None)
                         
                         try:
                             assert not (inp_feat_dict[combo][scale]==0).all(), "{}{} is all zero".format(combo, scale)

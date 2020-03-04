@@ -74,16 +74,16 @@ class PtSampleInGridAngle(Function):
 
 class PtSampleInGridWithNormal(Function):
     @staticmethod
-    def forward(ctx, pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib=False, norm_in_dist=False, ell_basedist=0, 
+    def forward(ctx, pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib=False, norm_in_dist=False, neg_nkern_to_zero=False, ell_basedist=0, 
                 return_nkern=False, filename=""):
         """ pts: B*2*N, pts_info: B*C*N, grid_source: B*C*H*W (C could be xyz, rgb, ...), grid_valid: B*1*H*W, neighbor_range: int
         """
         if not return_nkern:
             # y = cvo_dense_with_normal.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, ell_basedist)
-            outputs = cvo_dense_with_normal_output.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, ell_basedist, return_nkern)
+            outputs = cvo_dense_with_normal_output.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, neg_nkern_to_zero, ell_basedist, return_nkern)
             y = outputs[0]
         else:
-            outputs = cvo_dense_with_normal_output.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, ell_basedist, return_nkern)
+            outputs = cvo_dense_with_normal_output.forward(pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, neighbor_range, ell, mag_max, mag_min, ignore_ib, norm_in_dist, neg_nkern_to_zero, ell_basedist, return_nkern)
             y = outputs[0]
             nkern = outputs[1]
             save_nkern(nkern, pts, grid_source.shape, mag_max, mag_min, filename)
@@ -104,9 +104,9 @@ class PtSampleInGridWithNormal(Function):
         dy = dy.contiguous()
         dx1, dx2, dn1, dn2, dr1, dr2 = cvo_dense_with_normal.backward( \
             dy, pts, pts_info, grid_source, grid_valid, pts_normal, grid_normal, pts_nres, grid_nres, ctx.neighbor_range, ctx.ell, ctx.mag_max, ctx.mag_min, ctx.ignore_ib, ctx.norm_in_dist, ctx.ell_basedist)
-        # return None, dx1, dx2, None, dn1, dn2, dr1, dr2, None, None, None, None, None, None, None, None, None
-        # return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None, None, None, None
-        return None, dx1, dx2, None, dn1, dn2, None, None, None, None, None, None, None, None, None, None, None
+        # return None, dx1, dx2, None, dn1, dn2, dr1, dr2, None, None, None, None, None, None, None, None, None, None
+        # return None, dx1, dx2, None, None, None, dr1, dr2, None, None, None, None, None, None, None, None, None, None
+        return None, dx1, dx2, None, dn1, dn2, None, None, None, None, None, None, None, None, None, None, None, None
 
 class PtSampleInGridCalcNormal(Function):
     @staticmethod
