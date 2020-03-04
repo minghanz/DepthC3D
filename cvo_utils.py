@@ -290,8 +290,8 @@ def normal_from_grad(grad_x, grad_y, depth, K):
     cx = K[:,0,2].reshape(-1, 1, 1, 1)
     cy = K[:,1,2].reshape(-1, 1, 1, 1)
 
-    normal_0 = -fy * grad_x
-    normal_1 = -fx * grad_y
+    normal_0 = -fx * grad_x
+    normal_1 = -fy * grad_y
     normal_2 = (grid_x - cx) * grad_x + (grid_y - cy) * grad_y + depth
     normal = torch.cat([normal_0, normal_1, normal_2], dim=1)
     return F.normalize(normal, p=2, dim=1)
