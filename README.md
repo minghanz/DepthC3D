@@ -1,8 +1,12 @@
 # Monocular Depth Prediction Through Continuous 3D Loss
 
-This is the official implementation of the paper: **Monocular Depth Prediction Through Continuous 3D Loss**. 
+This is the official implementation of the paper: **Monocular Depth Prediction Through Continuous 3D Loss**. See [arXiv](https://arxiv.org/abs/2003.09763) version. 
 
 This repo is currently under heavy construction. 
+
+Video Demo: 
+
+[![Screenshot](https://img.youtube.com/vi/gDfAfD4yHuM/maxresdefault.jpg)](https://youtu.be/gDfAfD4yHuM)
 
 Below is the readme information of the work **Monodepth2**, which the coding of this work is based on. 
  
