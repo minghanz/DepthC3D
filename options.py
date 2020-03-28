@@ -32,7 +32,10 @@ class MonodepthOptions:
                                  help="the name of the server to run on",
                                  choices=["mcity", "sunny", "home"])
 
-        # TRAINING options
+        # DATASET options
+        self.parser.add_argument("--no_shuffle",
+                                 help="if set, do not shuffle dataset",
+                                 action="store_true")
         self.parser.add_argument("--model_name",
                                  type=str,
                                  help="the name of the folder to save the model in",
@@ -69,6 +72,17 @@ class MonodepthOptions:
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")
+        ######## for val_set
+        self.parser.add_argument("--no_val_set", 
+                                 help="if set, disable val_set", 
+                                 action="store_true")
+        self.parser.add_argument("--val_set_only", 
+                                 help="if set, only run val_set on pretrained weights", 
+                                 action="store_true")
+        self.parser.add_argument("--load_weights_folder_parent", 
+                                 type=str,
+                                 help="parent path of models to load, needed for val_set_only")
+
      #    self.parser.add_argument("--height",
      #                             type=int,
      #                             help="input image height",
@@ -77,6 +91,7 @@ class MonodepthOptions:
      #                             type=int,
      #                             help="input image width",
      #                             default=640)   ## comment this because written in trainer.py for easier cross-dataset training
+        # TRAINING options
         self.parser.add_argument("--disparity_smoothness",
                                  type=float,
                                  help="disparity smoothness weight",
@@ -209,6 +224,9 @@ class MonodepthOptions:
         self.parser.add_argument("--use_normal_v3",
                                  help="if set, normal vectors of sparse pcls are from PtSampleInGridCalcNormal, while those of dense images are from NormalFromDepthDense",
                                  action="store_true")
+        self.parser.add_argument("--neg_nkern_to_zero",
+                                 help="if set, negative normal kernels are truncated to zero, otherwise use absolute value of normel kernel",
+                                 action="store_true")
         self.parser.add_argument("--random_ell",
                                  help="if set, the length scale of geometric kernel is selected randomly following a certain distribution",
                                  action="store_true")
@@ -233,13 +251,6 @@ class MonodepthOptions:
         self.parser.add_argument("--align_preds",
                                  help="if set, inner prod between predictions of adjacent frames are included in loss",
                                  action="store_true")
-        ######## for val_set
-        self.parser.add_argument("--val_set_only", 
-                                 help="if set, only run val_set on pretrained weights", 
-                                 action="store_true")
-        self.parser.add_argument("--load_weights_folder_parent", 
-                                 type=str,
-                                 help="parent path of models to load, needed for val_set_only")
         self.parser.add_argument("--neighbor_range",
                                  type=int,
                                  help="neighbor range when calculating inner product",
@@ -259,23 +270,6 @@ class MonodepthOptions:
      #    self.parser.add_argument("--cross_set",
      #                             help="if set, use lyft_1024 in training",
      #                             action="store_true")
-        self.parser.add_argument("--save_pic_intv",
-                                 type=int,
-                                 help="interval between two image-saving iteration. Disabled if set to 0.",
-                                 default=0)
-        self.parser.add_argument("--save_pcd_intv",
-                                 type=int,
-                                 help="interval between two image-saving iteration. Disabled if set to 0.",
-                                 default=4000)
-        self.parser.add_argument("--save_pcd_pic_mode",
-                                 nargs="+",
-                                 type=str,
-                                 help="decide in which mode save pic/pcd files, to avoid train/val/val_set mixed up",
-                                 default="train", 
-                                 choices=["train", "val", "val_set"])
-        self.parser.add_argument("--config_file",
-                                 type=str,
-                                 help="to load options from file")
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda",
@@ -309,6 +303,26 @@ class MonodepthOptions:
                                  type=int,
                                  help="number of epochs between each save",
                                  default=1)
+        self.parser.add_argument("--save_pic_intv",
+                                 type=int,
+                                 help="interval between two image-saving iteration. Disabled if set to 0.",
+                                 default=0)
+        self.parser.add_argument("--save_nkern_pic",
+                                 help="if set, save nkern_pics as well",
+                                 action="store_true")
+        self.parser.add_argument("--save_pcd_intv",
+                                 type=int,
+                                 help="interval between two image-saving iteration. Disabled if set to 0.",
+                                 default=4000)
+        self.parser.add_argument("--save_pcd_pic_mode",
+                                 nargs="+",
+                                 type=str,
+                                 help="decide in which mode save pic/pcd files, to avoid train/val/val_set mixed up",
+                                 default="train", 
+                                 choices=["train", "val", "val_set"])
+        self.parser.add_argument("--config_file",
+                                 type=str,
+                                 help="to load options from file")
 
         # EVALUATION options
         self.parser.add_argument("--eval_stereo",

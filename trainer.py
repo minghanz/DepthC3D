@@ -291,11 +291,11 @@ class Trainer:
         ### from dataset to dataloader
         if len(self.opt.dataset) == 1:
             self.train_loader = DataLoader(
-                dataset_train[self.opt.dataset[0]], self.opt.batch_size, True,
+                dataset_train[self.opt.dataset[0]], self.opt.batch_size, not self.opt.no_shuffle,
                 num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
             
             self.val_loader = DataLoader(
-                dataset_val[self.opt.dataset_val[0]], self.opt.batch_size, True,
+                dataset_val[self.opt.dataset_val[0]], self.opt.batch_size, not self.opt.no_shuffle,
                 num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=my_collate_fn)
             
             print("Using train split:")
@@ -469,7 +469,8 @@ class Trainer:
                 self.run_epoch()
                 if (self.epoch + 1) % self.opt.save_frequency == 0:
                     self.save_model()
-                self.val_set()
+                if not self.opt.no_val_set:
+                    self.val_set()
     
     def run_val_set_only(self):
         """
@@ -1455,7 +1456,9 @@ class Trainer:
 
     def concat_flat(self, outputs):
         """
-        This concat does not create new items in the outputs dict
+        This concat does not create new items in the outputs dict. 
+        After this function, outputs[('flat_uv', ...)] is a 1*c*n tensor of uvb
+        n_pts_dict[('flat_uv', ...)] is a dict recording number of points in each sample of the batch
         """
         n_pts_dict = {}
         for item in outputs:
@@ -1601,14 +1604,14 @@ class Trainer:
                         # inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
                         #     flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.ell_basedist)
                         
-                        if self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and flat_idx == grid_idx and flat_idx == 0 and scale == 0 and self.run_mode in self.opt.save_pcd_pic_mode:
+                        if self.opt.save_nkern_pic and self.opt.save_pic_intv != 0 and self.step % self.opt.save_pic_intv == 0 and flat_idx == grid_idx and flat_idx == 0 and scale == 0 and self.run_mode in self.opt.save_pcd_pic_mode:
                             filename = os.path.join(self.nkern_path, "{}_{}_{}_{}_{}".format(self.step, flat_idx, scale, grid_idx, flat_gt ) )
                             filename_nkern = "{}_nkern".format(filename)
                             inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
-                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, True, self.opt.ell_basedist, True, filename_nkern)
+                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.neg_nkern_to_zero, self.opt.ell_basedist, True, filename_nkern)
                         else:
                             inp_feat_dict[combo][scale] = PtSampleInGridWithNormal.apply(flat_uv.contiguous(), flat_info.contiguous(), grid_info.contiguous(), grid_valid.contiguous(), \
-                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, True, self.opt.ell_basedist, False, None)
+                                flat_normal, grid_normal, flat_nres, grid_nres, neighbor_range, ell, self.opt.res_mag_max, self.opt.res_mag_min, False, self.opt.norm_in_dist, self.opt.neg_nkern_to_zero, self.opt.ell_basedist, False, None)
                         
                         try:
                             assert not (inp_feat_dict[combo][scale]==0).all(), "{}{} is all zero".format(combo, scale)

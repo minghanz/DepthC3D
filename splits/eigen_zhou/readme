@@ -1,0 +1,2 @@
+val_files_samp.txt is a list of file names in the sequence as iterated in training, for qualitative comparison using bts method. 
+val_files_bts.txt is a reformation of val_files_samp.txt for bts to read.
