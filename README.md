@@ -4,6 +4,8 @@ This is the official implementation of the paper: **Monocular Depth Prediction T
 
 This repo is currently under heavy construction. 
 
+**Please refer to this [repo](https://github.com/minghanz/c3d) for a modularized implementation of the C3D loss, so that you can easily plug this loss into your own depth prediction network. 
+
 Video Demo: 
 
 [![Screenshot](https://img.youtube.com/vi/gDfAfD4yHuM/maxresdefault.jpg)](https://youtu.be/gDfAfD4yHuM)
